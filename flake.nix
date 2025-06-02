@@ -1,40 +1,95 @@
-# Author: Peter Dragos
-# Repository: https://github.com/dragospe/python-flake-template
 {
-  description = "Flake to manage python workspace";
+  description = "Flake to manage Python workspace with UV and CUDA";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs";
-    flake-utils.url = "github:numtide/flake-utils";
-    flake-compat = {
-      url = "github:edolstra/flake-compat";
-      flake = false;
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+    pyproject-nix = {
+      url = "github:pyproject-nix/pyproject.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    uv2nix = {
+      url = "github:pyproject-nix/uv2nix";
+      inputs.pyproject-nix.follows = "pyproject-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    pyproject-build-systems = {
+      url = "github:pyproject-nix/build-system-pkgs";
+      inputs.pyproject-nix.follows = "pyproject-nix";
+      inputs.uv2nix.follows = "uv2nix";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, mach-nix, ... }:
-    flake-utils.lib.eachDefaultSystem (system:
-      let
-        pkgs = nixpkgs.legacyPackages.${system};
+  outputs = { self, nixpkgs, uv2nix, pyproject-nix, pyproject-build-systems, ... }:
+    let
+      inherit (nixpkgs) lib;
+      system = "x86_64-linux";
 
-        poetry-env = pkgs.poetry2nix.mkPoetryEnv { projectDir = ./.; };
-      in
-      {
-        devShell = poetry-env.env.overrideAttrs (oldAttrs: {
-          buildInputs = with pkgs;
-            [
-              nixpkgs-fmt
-              entr
-              fd
-              poetry
-            ];
+      pkgs = import nixpkgs {
+        inherit system;
+        config = {
+          allowUnfree = true;
+          cudaSupport = true;
+          cudaCapabilities = [ "8.6" ];
+        };
+      };
+
+      workspace = uv2nix.lib.workspace.loadWorkspace {
+        workspaceRoot = ./.;
+      };
+
+      overlay = workspace.mkPyprojectOverlay {
+        sourcePreference = "wheel";
+      };
+
+      python = pkgs.python312;
+      hacks = pkgs.callPackage pyproject-nix.build.hacks { };
+
+      pyprojectOverrides = final: prev: {
+        antlr4-python3-runtime = prev.antlr4-python3-runtime.overrideAttrs (old: {
+          nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ final.setuptools ];
         });
-        packages =
-          {
-            default = pkgs.poetry2nix.mkPoetryApplication {
-              projectDir = ./.;
-            };
+      };
+
+      pythonSet = (pkgs.callPackage pyproject-nix.build.packages {
+        inherit python;
+      }).overrideScope (lib.composeManyExtensions [
+        pyproject-build-systems.overlays.default
+        overlay
+        pyprojectOverrides
+      ]);
+
+    in
+    {
+      packages.${system}.default = pythonSet.mkVirtualEnv "ip_claim-prod" workspace.deps.default;
+
+      devShells.${system}.default =
+        let
+          virtualenv = pythonSet.mkVirtualEnv "ip_claim-dev" workspace.deps.all;
+        in
+        pkgs.mkShell {
+          NIX_BUILD_CORES = 4;
+          NIX_REMOTE = "daemon";
+          packages = with pkgs; [
+            virtualenv
+            uv
+            bzip2
+          ] ++ [ pkgs.doppler ];
+
+          env = {
+            LD_LIBRARY_PATH = lib.makeLibraryPath [
+              pkgs.zlib
+              pkgs.stdenv.cc.cc.lib
+            ];
+            # UV_NO_SYNC = "1";
+            UV_PYTHON = "${virtualenv}/bin/python";
           };
 
-      });
+          shellHook = ''
+            unset PYTHONPATH
+            source ${virtualenv}/bin/activate
+            uv pip install -e .
+          '';
+        };
+    };
 }
