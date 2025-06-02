@@ -28,7 +28,7 @@ class ApplicationDates(BaseModel):
 
     @model_validator(mode='before')
     @classmethod
-    def convert_date_fields(cls, data: Any) -> Any:
+    def convert_date_fields(cls, data: Any) -> Any:  # noqa: C901
         """Convert string dates to datetime objects, handling empty strings."""
         date_fields = [
             'date_produced',
@@ -139,12 +139,15 @@ class PatentApplication(Document):
 
     @property
     def application_number(self) -> str:
+        """Return the unique application number."""
         return self.metadata.application_number
 
     @property
     def filing_year(self) -> int:
+        """Extract the year from the filing date."""
         return self.dates.filing_date.year
 
     @property
     def inventor_countries(self) -> list[str]:
+        """List of unique countries from all inventors (excluding nulls)."""
         return list({inv.inventor_country for inv in self.inventors if inv.inventor_country})
