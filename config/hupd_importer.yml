@@ -1,0 +1,6 @@
+importer:
+  data_dir: "./data/2018"
+  batch_size: 5000
+  log_level: "INFO"
+  log_file: "/logs/patent_import.log"
+  max_errors: 1000

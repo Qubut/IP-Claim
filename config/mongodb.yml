@@ -1,0 +1,9 @@
+db:
+  uri: "mongodb+srv://root:${oc.env:MONGO_PASSWORD}@cluster0.tbrxdue.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+  db_name: "ip_claim"
+  auth_source: "admin"
+  max_pool_size: 200
+  timeout_ms: 10000
+  index_options:
+    background: true  # Faster indexing in production
+    allow_dropping: true
