@@ -1,0 +1,2 @@
+[console_scripts]
+generate-schemas = scripts.hupd_importer:run

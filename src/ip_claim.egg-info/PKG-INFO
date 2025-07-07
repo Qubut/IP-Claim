@@ -1,0 +1,26 @@
+Metadata-Version: 2.4
+Name: ip-claim
+Version: 0.1.0
+Summary: IP Claim Project
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: aiofiles>=24.1.0
+Requires-Dist: beanie>=1.29.0
+Requires-Dist: dspy>=2.6.27
+Requires-Dist: langchain>=0.3.26
+Requires-Dist: loguru>=0.7.3
+Requires-Dist: motor>=3.7.1
+Requires-Dist: numpy<2
+Requires-Dist: omegaconf>=2.3.0
+Requires-Dist: pandas>=2.3.0
+Requires-Dist: pip>=25.1.1
+Requires-Dist: polars>=1.31.0
+Requires-Dist: pymongo>=4.13.0
+Requires-Dist: pytest-asyncio>=1.0.0
+Requires-Dist: returns>=0.25.0
+Requires-Dist: spacy==3.7.5
+Requires-Dist: spacy-experimental==0.6.4
+Requires-Dist: types-aiofiles>=24.1.0.20250516
+Requires-Dist: types-pycurl>=7.45.6.20250309
+Requires-Dist: types-pyopenssl>=24.1.0.20240722
+Requires-Dist: types-requests>=2.32.0.20250515
