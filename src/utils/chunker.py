@@ -38,7 +38,6 @@ class PatentChunker:
         self.config = config
         self.claim_delimiter = re.compile(r'(\d+\.\s)')  # Regex to capture claim numbers
 
-        # Initialize the selected text splitter
         if config.splitter_type == 'spacy':
             self.splitter = SpacyTextSplitter(
                 chunk_size=config.chunk_size,
@@ -75,23 +74,21 @@ class PatentChunker:
 
         # Recombine claim numbers with their content
         for i in range(start_index, len(parts), 2):
-            if i + 1 < len(parts):
-                chunk = (parts[i] + parts[i + 1]).strip()
-                if chunk:
-                    chunks.append(chunk)
+            if i + 1 < len(parts) and (chunk := (parts[i] + parts[i + 1]).strip()):
+                chunks.append(chunk)
             elif parts[i].strip():
                 chunks.append(parts[i].strip())
 
         return chunks
 
     def _chunk_section(self, section_name: str, section_text: str) -> list[str]:
-        """Apply appropriate chunking strategy based on section type."""
+        """Applies appropriate chunking strategy based on section type."""
         if section_name == 'claims':
             return self._chunk_claims(section_text)
         return self.splitter.split_text(section_text)
 
     def chunk_document(self, document: LangChainDocument) -> list[LangChainDocument]:
-        """Split a patent document into chunks preserving structure."""
+        """Splits a patent document into chunks preserving structure."""
         try:
             # Convert document content back to structured format
             content = (
@@ -114,7 +111,6 @@ class PatentChunker:
             section_chunks = self._chunk_section(section_name, section_text)
 
             for i, chunk in enumerate(section_chunks):
-                # Create new chunk document with enhanced metadata
                 chunk_metadata = metadata.copy()
                 chunk_metadata.update({
                     'section': section_name,
