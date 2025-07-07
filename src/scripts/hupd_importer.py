@@ -25,8 +25,8 @@ def load_config() -> DictConfig | ListConfig:
     """Load and merge configuration from CLI and config file."""
     user_config = OmegaConf.from_cli()
     return OmegaConf.merge(
-        OmegaConf.load(user_config.get('config_path')),
-        OmegaConf.load(user_config.get('db_config_path')),
+        OmegaConf.load(user_config.get('config', 'config/hupd_importer.yml')),
+        OmegaConf.load(user_config.get('db-config', 'config/mongodb.yml')),
         user_config,
     )
 
@@ -56,13 +56,13 @@ class Importer:
         )
         return client
 
-    @future_safe
     @staticmethod
+    @future_safe
     async def _insert_into_db(patent_application: PatentApplication) -> None:
         await PatentApplication.insert(patent_application)
 
     @future_safe
-    async def process_file(self, file_path: Path) -> FutureResult[None, None]:
+    async def process_file(self, file_path: Path) -> None:
         """Process a single JSON file and create a PatentApplication object.
 
         Args:
@@ -73,6 +73,16 @@ class Importer:
         """
         async with aiofiles.open(file_path, encoding='utf-8') as f:
             data = json.loads(await f.read())
+            publication_number = data.get('publication_number')
+            if not publication_number:
+                logger.warning(f'No publication_number found in {file_path}, skipping.')
+                return
+            existing = await PatentApplication.find_one(
+                PatentApplication.metadata.publication_number == publication_number
+            )
+            if existing:
+                logger.info(f'⏭️ Patent application {publication_number} already exists, skipping.')
+                return
         patent_application = PatentApplication(
             metadata=ApplicationMetadata(**{
                 k: data.get(k)
@@ -120,18 +130,19 @@ class Importer:
                 for k in ['abstract', 'claims', 'background', 'summary', 'full_description']
             }),
         )
-        result: FutureResult[None, Exception] = self._insert_into_db(patent_application)
-        return (
-            result
-            .alt(lambda e: logger.error(f'Error processing file: {e}'))
-            .map(lambda _: logger.info(f'✅ Inserted {file_path} documents into the database'))
-        )
+        task: FutureResult[None, Exception] = self._insert_into_db(patent_application)
+        result = await task
+        result.alt(lambda e: logger.error(f'Error processing file: {e}'))
+        result.map(lambda _: logger.info(f'✅ Inserted {file_path} documents into the database'))
 
-    @future_safe
     @staticmethod
+    @future_safe
     async def _create_indexes() -> None:
         await PatentApplication.get_motor_collection().create_index([
-            ('metadata.title', 'text'),
+            ('metadata.application_number', 1),
+        ])
+        await PatentApplication.get_motor_collection().create_index([
+            ('metadata.publication_number', 'text'),
         ])
         logger.info('✅ Created full-text indexes')
 
@@ -148,14 +159,16 @@ class Importer:
         importer = self.config.importer
         files = [f for f in Path(importer.data_dir).glob('*.json') if f.is_file()]
         logger.info(f'Found {len(files)} JSON files to import')
-        results: list[IOResult[PatentApplication, Exception]] = await asyncio.gather(*[
-            self.process_file(file) for file in files
-        ])
-        successful_applications = [
-            result.value_or(0)
-            for result in results
-            if result.value_or(False)._inner_value  # noqa: FBT003, SLF001
+        step = 1000
+        results: list[IOResult[PatentApplication, Exception]] = [
+            result
+            for i in range(0, len(files), step)
+            for result in await asyncio.gather(*[
+                self.process_file(file) for file in files[i : i + step]
+            ])
         ]
+        successful_applications = sum(result.value_or(False) == IO(None) for result in results)
+
         logger.info(f'Successfully processed {len(successful_applications)} patent applications')
         await self._create_indexes().alt(logger.error)
 
@@ -163,9 +176,15 @@ class Importer:
 async def main() -> None:
     """Main function."""
     config: IO[DictConfig | ListConfig] = load_config()
-    importer = Importer(config._inner_value)  # noqa: SLF001
+
+    importer = config.map(Importer)._inner_value  # noqa: SLF001
     await importer.init_db().bind_awaitable(lambda _: importer.import_patents()).alt(logger.error)
 
 
-if __name__ == '__main__':
+def run():
+    """Runs the script."""
     asyncio.run(main())
+
+
+if __name__ == '__main__':
+    run()
