@@ -134,7 +134,7 @@ class PatentApplication(Document):
             'metadata.decision',
             'examiner.examiner_id',
             'inventors.inventor_country',
-            [('metadata.title', 'text')],
+            [('metadata.publication_number', 'text')],
         ]
 
     @property
