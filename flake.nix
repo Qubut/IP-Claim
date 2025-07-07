@@ -49,6 +49,12 @@
         antlr4-python3-runtime = prev.antlr4-python3-runtime.overrideAttrs (old: {
           nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ final.setuptools ];
         });
+        spacy = prev.spacy.overrideAttrs (old: {
+          nativeBuildInputs = (old.nativeBuildInputs or []) ++ [ final.setuptools ];
+        });
+        spacy-experimental = prev.spacy.overrideAttrs (old: {
+          nativeBuildInputs = (old.nativeBuildInputs or []) ++ [ final.setuptools ];
+        });
       };
 
       pythonSet = (pkgs.callPackage pyproject-nix.build.packages {
@@ -74,21 +80,25 @@
             virtualenv
             uv
             bzip2
-          ] ++ [ pkgs.doppler ];
+            python311
+            jupyter
+            python311Packages.ipykernel
+          ];
 
           env = {
             LD_LIBRARY_PATH = lib.makeLibraryPath [
               pkgs.zlib
               pkgs.stdenv.cc.cc.lib
             ];
-            # UV_NO_SYNC = "1";
-            UV_PYTHON = "${virtualenv}/bin/python";
+            UV_NO_SYNC = "1";
+            # UV_PYTHON = "${virtualenv}/bin/python";
           };
 
           shellHook = ''
-            unset PYTHONPATH
-            source ${virtualenv}/bin/activate
-            uv pip install -e .
+          unset PYTHONPATH
+          uv venv .venv
+          source .venv/bin/activate
+          uv pip install -e .
           '';
         };
     };
