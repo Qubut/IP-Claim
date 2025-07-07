@@ -3,15 +3,24 @@ name = "ip-claim"
 version = "0.1.0"
 description = "IP Claim Project"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "aiofiles>=24.1.0",
     "beanie>=1.29.0",
+    "dspy>=2.6.27",
+    "langchain>=0.3.26",
     "loguru>=0.7.3",
     "motor>=3.7.1",
+    "numpy<2",
     "omegaconf>=2.3.0",
+    "pandas>=2.3.0",
+    "pip>=25.1.1",
+    "polars>=1.31.0",
     "pymongo>=4.13.0",
+    "pytest-asyncio>=1.0.0",
     "returns>=0.25.0",
+    "spacy==3.7.5",
+    "spacy-experimental==0.6.4",
     "types-aiofiles>=24.1.0.20250516",
     "types-pycurl>=7.45.6.20250309",
     "types-pyopenssl>=24.1.0.20240722",
@@ -33,7 +42,7 @@ requires = ["setuptools>=65.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project.scripts]
-generate-schemas = "scripts.hupd_importer:main"
+generate-schemas = "scripts.hupd_importer:run"
 
 [tool.black]
 line-length = 100
@@ -47,6 +56,7 @@ extend-exclude = '''
 )
 '''
 [tool.ruff]
+
 # Ruff config: https://docs.astral.sh/ruff/settings
 src = ["src"]
 preview = true
@@ -116,6 +126,7 @@ ignore = [
   "D401",
   "D404",
   "D405",
+  "FBT003",
   "ISC001",  # implicit string concat conflicts with `ruff format`
   "ISC003",  # prefer explicit string concat over implicit concat
   "PLR09",   # we have our own complexity rules
@@ -144,9 +155,10 @@ pydocstyle.convention = "google"
 "wemake_python_styleguide/visitors/ast/*.py" = [ "N802" ]
 
 [tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
 # pytest config: http://doc.pytest.org/en/latest/customize.html
 testpaths = ["test"]
-norecursedirs = "sqlalchemy_models"
 python_files = "test_*.py"
 # Strict `@xfail` by default:
 xfail_strict = true
