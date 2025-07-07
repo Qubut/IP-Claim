@@ -6,13 +6,35 @@ services:
     container_name: mongodb
     restart: always
     environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:-admin}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:-12345678}
+      - MONGO_INITDB_ROOT_USERNAME=admin
+      - MONGO_INITDB_ROOT_PASSWORD=qwfpbb
     ports:
       - "27017:27017"
     volumes:
       - mongodb_data:/data/db
-      - ./mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+
+  neo4j:
+    image: neo4j:latest
+    container_name: neo4j
+    restart: always
+    environment:
+      - NEO4J_AUTH=neo4j/password
+      - NEO4J_ACCEPT_LICENSE_AGREEMENT=yes
+    ports:
+      - "7474:7474"  # Browser UI
+      - "7687:7687"  # Bolt protocol
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - neo4j_import:/var/lib/neo4j/import
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "password", "RETURN 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   mongodb_data:
+  neo4j_data:
+  neo4j_logs:
+  neo4j_import:
