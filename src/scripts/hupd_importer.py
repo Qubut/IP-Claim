@@ -159,7 +159,7 @@ class Importer:
         importer = self.config.importer
         files = [f for f in Path(importer.data_dir).glob('*.json') if f.is_file()]
         logger.info(f'Found {len(files)} JSON files to import')
-        step = 1000
+        step = importer.batch_size
         results: list[IOResult[PatentApplication, Exception]] = [
             result
             for i in range(0, len(files), step)
@@ -178,7 +178,8 @@ async def main() -> None:
     config: IO[DictConfig | ListConfig] = load_config()
 
     importer = config.map(Importer)._inner_value  # noqa: SLF001
-    await importer.init_db().bind_awaitable(lambda _: importer.import_patents()).alt(logger.error)
+    result = await importer.init_db().bind_awaitable(lambda _: importer.import_patents())
+    result.alt(logger.error)
 
 
 def run():
