@@ -8,13 +8,11 @@ This pipeline:
 4. Can be extended to generate Cypher or other outputs
 """
 
-import json
 from functools import reduce
+from typing import Literal
 
 import dspy
-import pandas as pd
 import spacy
-from loguru import logger
 
 
 def extract_entities(
@@ -33,7 +31,7 @@ def extract_entities(
         List of entity tuples: (text, label, start_char, end_char)
     """
     nlp = spacy.load(model)
-
+    nlp.add_pipe('entity_ruler', after='ner', config={'overwrite_ents': True})
     # Short-circuit for small texts
     if len(text) <= chunk_size:
         doc = nlp(text)
@@ -54,6 +52,7 @@ def extract_entities(
                 text.rfind('.', end_idx - window, end_idx),
                 text.rfind('?', end_idx - window, end_idx),
                 text.rfind('!', end_idx - window, end_idx),
+                text.rfind('\n', end_idx - window, end_idx),
             )
             end_idx = boundary + 1 if boundary > 0 else end_idx
             chunk = text[start_idx:end_idx]
@@ -68,9 +67,15 @@ def extract_entities(
     result, _ = reduce(
         process_chunk,
         range(0, text_length, chunk_size),
-        ([], 0)  # Initial accumulator: (empty entities list, last end_idx)
+        ([], 0),  # Initial accumulator: (empty entities list, last end_idx)
     )
     return result
+
+
+class EntityExtraction(dspy.Signature):
+    """Extract all possible entities from a given text."""
+    text: str = dspy.InputField(desc='Text to analyze for entities')
+    entities: list[str] = dspy.OutputField(desc='List of string entities')
 
 
 class RelationExtraction(dspy.Signature):
@@ -81,22 +86,27 @@ class RelationExtraction(dspy.Signature):
     - Only identify relationships between the provided entities
     - Use common relationship types like:  material_of, method_step, component_of, cites, improves, alternative_to, comprises, depends_on, etc.
     - For ambiguous relationships, choose the most specific type
-    - Output JSON format: {"relations": [{"entity1": str, "relation": str, "entity2": str}]}
+    - Output JSON format: {"relations": [{"e_1": str, "rel": str, "e_2": str}]}
     """
 
-    text = dspy.InputField(desc='Text to analyze for relationships')
-    entities = dspy.InputField(desc='List of entities in JSON format')
-    relations = dspy.OutputField(desc='Relationships in JSON format', prefix='```json\n')
+    text: str = dspy.InputField(desc='Text to analyze for relationships')
+    entities: list[str] = dspy.InputField(desc='List of string entities')
+    relations: dict[
+        Literal['relations'], list[dict[Literal['e_1'] | Literal['rel'] | Literal['e_2'], str]]
+    ] = dspy.OutputField(desc='Relationships in JSON format')
 
 
-class RelationExtractor(dspy.Module):
-    """LLM-based relation extractor between entities."""
+class KGBuilder(dspy.Module):
+    """Builds knowledge graphs from text using entity and relation extraction."""
 
     def __init__(self):
         super().__init__()
+        self.extract_entities = dspy.ChainOfThought(EntityExtraction)
         self.extract_relations = dspy.ChainOfThought(RelationExtraction)
 
-    def forward(self, text: str, entities: list[tuple]) -> dict:
+    def __call__(self, text: str) ->  dict[
+        Literal['relations'], list[dict[Literal['e_1'] | Literal['rel'] | Literal['e_2'], str]]
+    ]:
         """
         Extract relationships between entities using LLM.
 
@@ -107,83 +117,5 @@ class RelationExtractor(dspy.Module):
         Returns:
             Dictionary of parsed relationships
         """
-        entity_list = [{'text': e[0], 'label': e[1]} for e in entities]
-        entity_json = json.dumps(entity_list)
-
-        result = self.extract_relations(text=text, entities=entity_json)
-
-        try:
-            relations_json = result.relations.strip().replace('```json', '').strip('`', '')
-            return json.loads(relations_json)
-        except json.JSONDecodeError:
-            return {'relations': []}
-
-
-class KnowledgeGraphBuilder:
-    """Builds knowledge graphs from text using entity and relation extraction."""
-
-    def __init__(self, spacy_model: str = 'en_core_web_lg'):
-        """
-        Initialize the knowledge graph builder.
-
-        Args:
-            spacy_model: spaCy model to use for entity extraction
-        """
-        self.spacy_model = spacy_model
-        self.relation_extractor = RelationExtractor()
-
-    def build_knowledge_graph(self, text: str) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        Process text to extract entities and relations.
-
-        Args:
-            text: Input text to process
-
-        Returns:
-            Tuple of DataFrames: (entities_df, relations_df)
-        """
-        entities = extract_entities(text, model=self.spacy_model)
-        entities_df = pd.DataFrame(entities, columns=['text', 'label', 'start_char', 'end_char'])
-
-        if not entities:
-            # Return empty relations if no entities are found
-            relations_df = pd.DataFrame(columns=['entity1', 'relation', 'entity2'])
-            return entities_df, relations_df
-
-        if (relations := self.relation_extractor(text, entities).get('relations', [])):
-            relations_df = pd.DataFrame(relations)
-            required_cols = ['entity1', 'relation', 'entity2']
-            for col in required_cols:
-                if col not in relations_df.columns:
-                    relations_df[col] = None
-            relations_df = relations_df[required_cols]
-            return entities_df, relations_df
-        # Return empty relations if no relations are found
-        relations_df = pd.DataFrame(columns=required_cols)
-        return entities_df, relations_df
-
-
-if __name__ == '__main__':
-    kg_builder = KnowledgeGraphBuilder()
-
-    medical_text = (
-        'Patient John Smith, age 45, presented with hypertension and diabetes. '
-        'Dr. Emily Johnson prescribed Lisinopril 10mg daily and Metformin 500mg twice daily. '
-        'John works at Microsoft in Redmond, Washington.'
-    )
-
-    entities_df, relations_df = kg_builder.build_knowledge_graph(medical_text)
-
-    logger.info(f'\nEntities DataFrame:\n{entities_df}')
-    logger.info(f'\nRelations DataFrame:\n{relations_df}')
-
-    tech_text = (
-        'Patent US1234567 describes a quantum computing method using superconducting qubits. '
-        'The invention was created by Dr. Alan Turing at MIT in 2023. '
-        'The system operates at temperatures below 50mK using liquid helium cooling.'
-    )
-
-    entities_df, relations_df = kg_builder.build_knowledge_graph(tech_text)
-
-    logger.info(f'\nTechnology Entities:\n{entities_df}')
-    logger.info(f'\nTechnology Relations:\n{relations_df}')
+        entities = self.extract_entities(text=text)
+        return self.extract_relations(text=text, entities=entities)
