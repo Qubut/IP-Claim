@@ -206,7 +206,9 @@ dist
 .moon/docker
 
 # python
+python/
 .ipynb_checkpoints
 __pycache__
 .venv
 *.ruff_cache
+*.egg-info
