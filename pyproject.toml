@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "aiofiles>=24.1.0",
+    "asyncio>=4.0.0",
     "beanie>=1.29.0",
     "dspy>=2.6.27",
     "langchain>=0.3.26",
@@ -19,6 +20,7 @@ dependencies = [
     "pymongo>=4.13.0",
     "pytest-asyncio>=1.0.0",
     "returns>=0.25.0",
+    "sglang[all]>=0.4.9.post3",
     "spacy==3.7.5",
     "spacy-experimental==0.6.4",
     "types-aiofiles>=24.1.0.20250516",
