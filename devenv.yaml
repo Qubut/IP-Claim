@@ -1,0 +1,14 @@
+# yaml-language-server: $schema=https://devenv.sh/devenv.schema.json
+imports:
+  - ./packages/ip_claim
+  - ./packages/epo_processor
+inputs:
+  # Currently pinned to: playwright@1.52.0
+  # See https://search.nixos.org/packages?channel=25.05&from=0&size=50&sort=relevance&type=packages&query=playwright
+  nixpkgs-playwright:
+    url: github:NixOS/nixpkgs/979daf34c8cacebcd917d540070b52a3c2b9b16e
+  nixpkgs-stable:
+    url: github:NixOS/nixpkgs/nixos-25.05
+  nixpkgs:
+    url: github:cachix/devenv-nixpkgs/rolling
+    # url: github:NixOS/nixpkgs/nixos-unstable
