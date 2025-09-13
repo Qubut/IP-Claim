@@ -1,0 +1,9 @@
+base_url: "https://publication-bdds.apps.epo.org/bdds/bdds-bff-service/prod/api/public"
+product_id: 3
+download_dir: "downloads"
+download: true
+extract: true
+delete_after_extract: true
+parse: true
+output_csv: "./data.csv"
+batch_size: 10
