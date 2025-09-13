@@ -212,3 +212,17 @@ __pycache__
 .venv
 *.ruff_cache
 *.egg-info
+*.txt
+
+# Devenv
+.devenv*
+devenv.local.nix
+
+# pre-commit
+.pre-commit-config.yaml
+
+# rust
+.cargo
+target
+
+downloads
