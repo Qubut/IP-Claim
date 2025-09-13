@@ -33,12 +33,14 @@ class PatentConverter:
             title=patent.metadata.title,
             decision=patent.metadata.decision,
             filing_date=patent.dates.filing_date.isoformat() if patent.dates.filing_date else None,
-            patent_issue_date=patent.dates.patent_issue_date.isoformat()
-            if patent.dates.patent_issue_date
-            else None,
-            abandon_date=patent.dates.abandon_date.isoformat()
-            if patent.dates.abandon_date
-            else None,
+            patent_issue_date=(
+                patent.dates.patent_issue_date.isoformat()
+                if patent.dates.patent_issue_date
+                else None
+            ),
+            abandon_date=(
+                patent.dates.abandon_date.isoformat() if patent.dates.abandon_date else None
+            ),
             main_cpc_label=patent.classification.main_cpc_label,
             cpc_labels=patent.classification.cpc_labels,
             main_ipcr_label=patent.classification.main_ipcr_label,

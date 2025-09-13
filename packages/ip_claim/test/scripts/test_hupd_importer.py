@@ -9,16 +9,18 @@ from returns.io import IO
 from models.hupd import PatentApplication
 from scripts.hupd_importer import Importer, main
 
-SAMPLE_CONFIG = OmegaConf.create({
-    'db': {
-        'uri': 'mongodb://mock:27017',
-        'max_pool_size': 10,
-        'timeout_ms': 5000,
-        'db_name': 'test_db',
-        'index_options': {'allow_dropping': True},
-    },
-    'importer': {'data_dir': '/fake/data/dir'},
-})
+SAMPLE_CONFIG = OmegaConf.create(
+    {
+        'db': {
+            'uri': 'mongodb://mock:27017',
+            'max_pool_size': 10,
+            'timeout_ms': 5000,
+            'db_name': 'test_db',
+            'index_options': {'allow_dropping': True},
+        },
+        'importer': {'data_dir': '/fake/data/dir'},
+    }
+)
 
 SAMPLE_PATENT_JSON = {
     'application_number': '14112715',
@@ -99,6 +101,7 @@ async def test_process_file_success(importer, tmp_path):
         assert inserted_patent.examiner.examiner_name_last == 'SMITH'
         assert len(inserted_patent.inventors) == 1
         assert inserted_patent.content.abstract == 'Test abstract'
+
 
 @pytest.mark.asyncio
 async def test_process_file_invalid(importer, tmp_path):

@@ -74,6 +74,7 @@ def extract_entities(
 
 class EntityExtraction(dspy.Signature):
     """Extract all possible entities from a given text."""
+
     text: str = dspy.InputField(desc='Text to analyze for entities')
     entities: list[str] = dspy.OutputField(desc='List of string entities')
 
@@ -104,7 +105,9 @@ class KGBuilder(dspy.Module):
         self.extract_entities = dspy.ChainOfThought(EntityExtraction)
         self.extract_relations = dspy.ChainOfThought(RelationExtraction)
 
-    def __call__(self, text: str) ->  dict[
+    def __call__(
+        self, text: str
+    ) -> dict[
         Literal['relations'], list[dict[Literal['e_1'] | Literal['rel'] | Literal['e_2'], str]]
     ]:
         """

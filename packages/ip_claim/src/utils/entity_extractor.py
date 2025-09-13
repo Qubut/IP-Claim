@@ -44,16 +44,12 @@ def extract_entities(
             except ValueError:
                 continue
 
-            mentions = [(
-                    span.start_char,
-                    span.end_char,
-                    span.text
-                ) for span in span_group]
+            mentions = [(span.start_char, span.end_char, span.text) for span in span_group]
 
             if mentions:
                 coref_chains[chain_id] = {
                     'main_mention': 0,  # Use first mention as main
-                    'mentions': mentions
+                    'mentions': mentions,
                 }
 
     logger.info(f'Found {len(coref_chains)} coreference clusters')

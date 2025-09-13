@@ -112,11 +112,13 @@ class PatentChunker:
 
             for i, chunk in enumerate(section_chunks):
                 chunk_metadata = metadata.copy()
-                chunk_metadata.update({
-                    'section': section_name,
-                    'chunk_index': i,
-                    'total_chunks': len(section_chunks),
-                })
+                chunk_metadata.update(
+                    {
+                        'section': section_name,
+                        'chunk_index': i,
+                        'total_chunks': len(section_chunks),
+                    }
+                )
 
                 if (
                     section_name == 'claims'

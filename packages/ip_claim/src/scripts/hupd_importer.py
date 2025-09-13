@@ -84,51 +84,61 @@ class Importer:
                 logger.info(f'⏭️ Patent application {publication_number} already exists, skipping.')
                 return
         patent_application = PatentApplication(
-            metadata=ApplicationMetadata(**{
-                k: data.get(k)
-                for k in [
-                    'application_number',
-                    'publication_number',
-                    'patent_number',
-                    'title',
-                    'decision',
-                ]
-            }),
-            dates=ApplicationDates(**{
-                k: data.get(k)
-                for k in [
-                    'date_produced',
-                    'date_published',
-                    'filing_date',
-                    'patent_issue_date',
-                    'abandon_date',
-                ]
-            }),
-            classification=ClassificationInfo(**{
-                k: data.get(k)
-                for k in [
-                    'main_cpc_label',
-                    'cpc_labels',
-                    'main_ipcr_label',
-                    'ipcr_labels',
-                    'uspc_class',
-                    'uspc_subclass',
-                ]
-            }),
-            examiner=ExaminerInfo(**{
-                k: data.get(k)
-                for k in [
-                    'examiner_id',
-                    'examiner_name_last',
-                    'examiner_name_first',
-                    'examiner_name_middle',
-                ]
-            }),
+            metadata=ApplicationMetadata(
+                **{
+                    k: data.get(k)
+                    for k in [
+                        'application_number',
+                        'publication_number',
+                        'patent_number',
+                        'title',
+                        'decision',
+                    ]
+                }
+            ),
+            dates=ApplicationDates(
+                **{
+                    k: data.get(k)
+                    for k in [
+                        'date_produced',
+                        'date_published',
+                        'filing_date',
+                        'patent_issue_date',
+                        'abandon_date',
+                    ]
+                }
+            ),
+            classification=ClassificationInfo(
+                **{
+                    k: data.get(k)
+                    for k in [
+                        'main_cpc_label',
+                        'cpc_labels',
+                        'main_ipcr_label',
+                        'ipcr_labels',
+                        'uspc_class',
+                        'uspc_subclass',
+                    ]
+                }
+            ),
+            examiner=ExaminerInfo(
+                **{
+                    k: data.get(k)
+                    for k in [
+                        'examiner_id',
+                        'examiner_name_last',
+                        'examiner_name_first',
+                        'examiner_name_middle',
+                    ]
+                }
+            ),
             inventors=data.get('inventor_list', []),
-            content=PatentContent(**{
-                k: data.get(k)
-                for k in ['abstract', 'claims', 'background', 'summary', 'full_description']
-            }),
+            content=PatentContent(
+                **{
+                    k: data.get(k)
+                    for k in ['abstract', 'claims', 'background', 'summary', 'full_description']
+                }
+            ),
         )
         task: FutureResult[None, Exception] = self._insert_into_db(patent_application)
         result = await task
@@ -138,12 +148,16 @@ class Importer:
     @staticmethod
     @future_safe
     async def _create_indexes() -> None:
-        await PatentApplication.get_motor_collection().create_index([
-            ('metadata.application_number', 1),
-        ])
-        await PatentApplication.get_motor_collection().create_index([
-            ('metadata.publication_number', 'text'),
-        ])
+        await PatentApplication.get_motor_collection().create_index(
+            [
+                ('metadata.application_number', 1),
+            ]
+        )
+        await PatentApplication.get_motor_collection().create_index(
+            [
+                ('metadata.publication_number', 'text'),
+            ]
+        )
         logger.info('✅ Created full-text indexes')
 
     @future_safe
@@ -163,9 +177,9 @@ class Importer:
         results: list[IOResult[PatentApplication, Exception]] = [
             result
             for i in range(0, len(files), step)
-            for result in await asyncio.gather(*[
-                self.process_file(file) for file in files[i : i + step]
-            ])
+            for result in await asyncio.gather(
+                *[self.process_file(file) for file in files[i : i + step]]
+            )
         ]
         successful_applications = sum(result.value_or(False) == IO(None) for result in results)
 
