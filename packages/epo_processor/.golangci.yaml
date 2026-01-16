@@ -1,0 +1,22 @@
+version: "2"
+
+linters:
+  default: standard          # ← good balance, most projects use this
+  # default: all            # very strict – many false positives
+
+  enable:
+    - errcheck
+    - gosec
+    - revive
+    - staticcheck
+
+  settings:
+    errcheck:
+      exclude-functions:
+        - github.com/spf13/viper:BindPFlag
+        - github.com/spf13/cobra:MarkFlagRequired
+        - github.com/spf13/cobra:MarkPersistentFlagRequired
+
+issues:
+  max-issues-per-linter: 0   # no limit
+  max-same-issues: 0         # no limit
