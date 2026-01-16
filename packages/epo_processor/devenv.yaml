@@ -1,0 +1,11 @@
+inputs:
+  nixpkgs:
+    url: github:cachix/devenv-nixpkgs/rolling
+  nixpkgs-stable:
+    url: github:NixOS/nixpkgs/nixos-25.05
+imports:
+- /devenv/devenv.nix
+secretspec:
+  enable: true
+  profile: default
+  provider: dotenv
