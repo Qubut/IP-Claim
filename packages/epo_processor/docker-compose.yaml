@@ -1,0 +1,35 @@
+version: '3.8'
+services:
+  openobserve:
+    image: public.ecr.aws/zinclabs/openobserve:latest
+    restart: unless-stopped
+    environment:
+      - ZO_ROOT_USER_EMAIL=root@example.com  # Replace with your email
+      - ZO_ROOT_USER_PASSWORD=pass123  # Replace with a strong password
+      - ZO_DATA_DIR=/data
+    ports:
+      - "5080:5080"  # Web UI and API
+      # Remove or adjust these optional syslog ports (see Step 3 for options)
+      # - "1514:514/tcp"  # Example: Map host 1514 (unprivileged) to container 514
+      # - "1514:514/udp"
+    volumes:
+      - ./openobserve-data:/data  # Persistent storage for data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://localhost:5080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    restart: unless-stopped
+    command: ["--config=/etc/otel/config.yaml"]
+    environment:
+      - AUTH_TOKEN=cm9vdEBleGFtcGxlLmNvbTpDb21wbGV4cGFzcyMxMjM=  # Replace with your base64 auth
+    ports:
+      - "4317:4317"  # OTLP gRPC receiver
+      - "4318:4318"  # OTLP HTTP receiver
+      - "13133:13133"  # Health check
+    volumes:
+      - ./otel-config.yaml:/etc/otel/config.yaml  # Mount custom config
+      - ${XDG_RUNTIME_DIR}/podman/podman.sock:/run/podman/podman.sock:ro  # Mount Podman socket (rootless)
