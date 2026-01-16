@@ -2,7 +2,7 @@
 
 A command-line tool built in Go for downloading, extracting, and parsing European Patent Office (EPO) patent data. It supports concurrent processing, configurable telemetry (OTEL), and functional programming patterns via fp-go, with built-in metrics, tracing, and CSV output.
 
-![Go Version](https://img.shields.io/badge/go-1.22-blue)
+![Go Version](https://img.shields.io/badge/go-1.25-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Build Status](https://img.shields.io/badge/build-passing-brightgreen)
 
@@ -131,7 +131,7 @@ Live reload for development:
 
 ```bash
 
-make dev  
+make dev
 
 ```
 
