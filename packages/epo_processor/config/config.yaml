@@ -1,0 +1,38 @@
+log:
+  log_level: info
+  log_dir: logs
+
+server: # epo server
+  base_url: "https://publication-bdds.apps.epo.org/bdds/bdds-bff-service/prod/api/public"
+  product_id: 3
+  max_retries: 5
+  timeout: 30s
+  concurrent_downloads: 5 # min:1, max:30
+
+download:
+  directory: "data"
+  skip_exists: true
+  verify_sha1: true
+  enabled: true
+  hupd:
+    url: "https://huggingface.co/datasets/HUPD/hupd/resolve/main/data/all-years.tar"
+    filename: hupd_all-years.tar
+    enabled: true
+
+extract:
+  enabled: true
+  delete_after_extract: true
+
+parse:
+  enabled: true
+  output_csv: "./data_full.csv"
+  workers: 300
+
+telemetry:
+  enabled: true
+  exporter: otlp
+  endpoint: localhost:4317
+  protocol: grpc
+  insecure: true
+  service_name: epo_processor
+  headers:
