@@ -19,7 +19,6 @@ env = {
     ruff
     black
     isort
-    python311Packages.pip
     zip
   ];
 
