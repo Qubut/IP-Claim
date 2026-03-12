@@ -16,7 +16,7 @@ var parseCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
-		err := services.Parser.ParseAllToCSV(
+		err := services.Parser.ParseAllToParquet(
 			ctx,
 			cfg.Download.Directory,
 			cfg.Parse.OutputCSV,

@@ -18,7 +18,7 @@ import (
 
 	"github.com/IBM/fp-go/v2/array"
 	ET "github.com/IBM/fp-go/v2/either"
-	"github.com/IBM/fp-go/v2/function"
+	F "github.com/IBM/fp-go/v2/function"
 	IOE "github.com/IBM/fp-go/v2/ioeither"
 	"github.com/IBM/fp-go/v2/ioeither/file"
 	Http "github.com/IBM/fp-go/v2/ioeither/http"
@@ -127,7 +127,56 @@ func NewDownloader(
 	return d, nil
 }
 
-func (downloader *Downloader) FetchFiles(ctx context.Context) IOE.IOEither[error, []int64] {
+func (downloader *Downloader) DownloadHupd(ctx context.Context) IOE.IOEither[error, int64] {
+	if downloader.Cfg.Download.HUPD.Enabled {
+		downloader.Logger.Infow("Starting downloading HUPD dataset",
+			"hupd_url", downloader.Cfg.Download.HUPD.URL,
+			"hupd_filename", downloader.Cfg.Download.HUPD.Filename)
+		client := Http.MakeClient(&http.Client{})
+		select {
+		case <-ctx.Done():
+			return IOE.Left[int64](ctx.Err())
+		default:
+			acquire := client.Do(Http.MakeGetRequest(downloader.Cfg.Download.HUPD.URL))
+			use := F.Flow2(func(resp *http.Response) IOE.IOEither[error, int64] {
+				if resp.StatusCode != http.StatusOK {
+					return IOE.Left[int64](fmt.Errorf("bad status: %d", resp.StatusCode))
+				}
+				return IOE.Bracket(
+					file.Create(downloader.Cfg.Download.HUPD.Filename),
+					func(f *os.File) IOE.IOEither[error, int64] {
+						var writer io.Writer = f
+						if downloader.progress != nil {
+							writer = io.MultiWriter(f, downloader.progress)
+						}
+						return IOE.TryCatchError(func() (int64, error) {
+							return io.Copy(writer, resp.Body)
+						})
+					},
+					func(f *os.File, _ ET.Either[error, int64]) IOE.IOEither[error, any] {
+						return IOE.TryCatchError(func() (any, error) { return nil, f.Close() })
+					},
+				)
+			}, IOE.Tap(func(size int64) IOE.IOEither[error, int64] {
+				downloader.Logger.Infow(
+					"Finished Downloading HUPD dataset",
+					"HUPD_downloaded_size",
+					size,
+				)
+				return IOE.Of[error](size)
+			}))
+			release := func(resp *http.Response, _ ET.Either[error, int64]) IOE.IOEither[error, T.Unit] {
+				return IOE.TryCatchError(
+					func() (T.Unit, error) { return T.Unit{}, resp.Body.Close() },
+				)
+			}
+			return IOE.Bracket(acquire, use, release)
+		}
+	}
+	return IOE.Of[error](int64(0))
+}
+
+func (downloader *Downloader) FetchEPOFiles(ctx context.Context) IOE.IOEither[error, []int64] {
 	ctx, span := downloader.Tracer.Start(ctx, "download.session", trace.WithAttributes(
 		attribute.Int("product_id", downloader.Cfg.Server.ProductID),
 		attribute.String("base_url", downloader.Cfg.Server.BaseURL),
@@ -139,7 +188,7 @@ func (downloader *Downloader) FetchFiles(ctx context.Context) IOE.IOEither[error
 	downloader.Logger.Infow("Starting bulk download session",
 		"product_id", downloader.Cfg.Server.ProductID,
 		"concurrent", downloader.Cfg.Server.ConcurrentDownloads)
-	addProgressBar := function.Flow2(
+	addProgressBar := F.Flow2(
 		array.Reduce(
 			func(acc tuple.Tuple2[int64, int], item DownloadFile) tuple.Tuple2[int64, int] {
 				return tuple.Tuple2[int64, int]{F1: acc.F1 + item.expectedSize, F2: acc.F2 + 1}
@@ -166,12 +215,12 @@ func (downloader *Downloader) FetchFiles(ctx context.Context) IOE.IOEither[error
 			return IOE.Of[error](T.Unit{})
 		},
 	)
-	timeout := function.Ternary(
+	timeout := F.Ternary(
 		func(t time.Duration) bool { return t > 0 },
-		function.Constant1[time.Duration, time.Duration](
+		F.Constant1[time.Duration](
 			time.Duration(downloader.Cfg.Server.Timeout)*time.Second,
 		),
-		function.Constant1[time.Duration, time.Duration](30*time.Second),
+		F.Constant1[time.Duration](30*time.Second),
 	)(
 		downloader.Cfg.Server.Timeout,
 	)
@@ -192,8 +241,8 @@ func (downloader *Downloader) FetchFiles(ctx context.Context) IOE.IOEither[error
 			acquire := IOE.FromIO[error](
 				func() DownloadFile { semaphore <- T.Unit{}; return downloadFile },
 			)
-			use := function.Flow2(
-				function.Curry3(downloader.DownloadFile)(ctx)(client),
+			use := F.Flow2(
+				F.Curry3(downloader.DownloadEPOFile)(ctx)(client),
 				IOE.Chain(func(size int64) IOE.IOEither[error, int64] {
 					completed.Add(1)
 					desc := fmt.Sprintf(
@@ -217,18 +266,18 @@ func (downloader *Downloader) FetchFiles(ctx context.Context) IOE.IOEither[error
 			downloader.progress.Describe("Download complete")
 			err := downloader.progress.Finish()
 			if err != nil {
-				return IOE.Left[T.Unit](fmt.Errorf("Error upon progress bar finishing, %s", err))
+				return IOE.Left[T.Unit](fmt.Errorf("error upon progress bar finishing, %s", err))
 			}
 
 			exit_err := downloader.progress.Exit()
 			if exit_err != nil {
-				return IOE.Left[T.Unit](fmt.Errorf("Error upon progress bar cleanup, %s", exit_err))
+				return IOE.Left[T.Unit](fmt.Errorf("error upon progress bar cleanup, %s", exit_err))
 			}
 		}
 		fmt.Fprintln(os.Stderr)
 		return IOE.Of[error](T.Unit{})
 	}
-	program := function.Pipe6(
+	program := F.Pipe6(
 		request,
 		Http.ReadJSON[models.Product](client),
 		IOE.Chain(func(p models.Product) IOE.IOEither[error, []DownloadFile] {
@@ -318,13 +367,13 @@ func parseFileSize(s string) int64 {
 		})
 	}
 	multiplier := getUnitMultiplier(unit)
-	whole := function.Pipe2(
+	whole := F.Pipe2(
 		integerPart,
 		parseInt,
 		option.Map(func(whole int64) int64 { return whole * multiplier }),
 	)
 	add := func(a, b int64) option.Option[int64] { return option.Some(a + b) }
-	decimal := function.Pipe2(decimalPart, parseInt, option.Map(func(decimal int64) int64 {
+	decimal := F.Pipe2(decimalPart, parseInt, option.Map(func(decimal int64) int64 {
 		scale := int64(math.Pow10(len(decimalPart)))
 		return (decimal * multiplier) / scale
 	}))
@@ -350,7 +399,7 @@ func getUnitMultiplier(unit string) int64 {
 	}
 }
 
-func (downloader *Downloader) DownloadFile(
+func (downloader *Downloader) DownloadEPOFile(
 	ctx context.Context,
 	client Http.Client,
 	f DownloadFile,
@@ -425,12 +474,12 @@ func (downloader *Downloader) DownloadFile(
 			)
 		}
 	}
-	result := function.Pipe2(IOE.Retrying(policy, action, ET.Fold(
+	result := F.Pipe2(IOE.Retrying(policy, action, ET.Fold(
 		func(err error) bool {
 			fmt.Println(err)
 			return true
 		},
-		function.Constant1[int64](false),
+		F.Constant1[int64](false),
 	),
 	), IOE.Tap(func(size int64) IOE.IOEither[error, T.Unit] {
 		durationMs := time.Since(startTime).Milliseconds()

@@ -9,7 +9,8 @@ import (
 )
 
 type DownloaderInterface interface {
-	FetchFiles(ctx context.Context) ioeither.IOEither[error, []int64]
+	FetchEPOFiles(ctx context.Context) ioeither.IOEither[error, []int64]
+	DownloadHupd(ctx context.Context) ioeither.IOEither[error, int64]
 }
 
 type ExtractorInterface interface {
@@ -17,5 +18,5 @@ type ExtractorInterface interface {
 }
 
 type ParserInterface interface {
-	ParseAllToCSV(ctx context.Context, downloadDir, outputCSV string, maxWorkers int64) error
+	ParseAllToParquet(ctx context.Context, downloadDir, outputCSV string, maxWorkers int64) error
 }

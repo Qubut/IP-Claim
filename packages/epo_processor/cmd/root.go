@@ -87,7 +87,7 @@ var RootCmd = &cobra.Command{
 		defer cancel()
 
 		if cfg.Download.Enabled {
-			res := services.Downloader.FetchFiles(ctx)()
+			res := services.Downloader.FetchEPOFiles(ctx)()
 			err := function.Pipe1(
 				res,
 				ET.Fold(
@@ -113,7 +113,7 @@ var RootCmd = &cobra.Command{
 			}
 		}
 		if cfg.Parse.Enabled {
-			if err := services.Parser.ParseAllToCSV(ctx, cfg.Download.Directory, cfg.Parse.OutputCSV, int64(cfg.Parse.Workers)); err != nil {
+			if err := services.Parser.ParseAllToParquet(ctx, cfg.Download.Directory, cfg.Parse.OutputCSV, int64(cfg.Parse.Workers)); err != nil {
 				return fmt.Errorf("parse: %w", err)
 			}
 		}
@@ -191,7 +191,8 @@ func init() {
 
 	configCmd.AddCommand(printConfigCmd)
 
-	RootCmd.AddCommand(downloadCmd)
+	RootCmd.AddCommand(downloadEpoCmd)
+	RootCmd.AddCommand(downloadHupdCmd)
 	RootCmd.AddCommand(extractCmd)
 	RootCmd.AddCommand(parseCmd)
 	RootCmd.AddCommand(versionCmd)

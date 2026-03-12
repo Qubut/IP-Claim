@@ -1,7 +1,9 @@
 package extract
 
 import (
+	"archive/tar"
 	"archive/zip"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -23,6 +25,16 @@ import (
 	T "github.com/Qubut/IP-Claim/packages/epo_processor/internal/typing"
 )
 
+type ArchiveType string
+
+const (
+	ZipType     ArchiveType = "zip"
+	TarType     ArchiveType = "tar"
+	TarGzType   ArchiveType = "tar.gz"
+	TgzType     ArchiveType = "tgz"
+	UnknownType ArchiveType = "unknown"
+)
+
 type Extractor struct {
 	Cfg             config.Config
 	DeleteAfter     bool
@@ -35,8 +47,8 @@ type Extractor struct {
 	Meter           metric.Meter
 	sessionDuration metric.Int64Histogram
 	filesTotal      metric.Int64Counter
-	zipsTotal       metric.Int64Counter
-	zipsFailed      metric.Int64Counter
+	archivesTotal   metric.Int64Counter
+	archivesFailed  metric.Int64Counter
 	bytesTotal      metric.Int64Counter
 	fileDuration    metric.Int64Histogram
 }
@@ -75,17 +87,17 @@ func NewExtractor(
 		return nil, err
 	}
 
-	e.zipsTotal, err = meter.Int64Counter(
-		"extraction.zips.total",
-		metric.WithDescription("Number of zip archives processed"),
+	e.archivesTotal, err = meter.Int64Counter(
+		"extraction.archives.total",
+		metric.WithDescription("Number of archives processed"),
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	e.zipsFailed, err = meter.Int64Counter(
-		"extraction.zips.failed",
-		metric.WithDescription("Number of zip archives that failed to extract"),
+	e.archivesFailed, err = meter.Int64Counter(
+		"extraction.archives.failed",
+		metric.WithDescription("Number of archives that failed to extract"),
 	)
 	if err != nil {
 		return nil, err
@@ -124,7 +136,7 @@ func (e *Extractor) ExtractAll(ctx context.Context, dir string) IOE.IOEither[err
 	e.progress = progressbar.NewOptions64(-1,
 		progressbar.OptionSetWriter(os.Stdout),
 		progressbar.OptionSetWidth(60),
-		progressbar.OptionSetDescription("[0 extracted] Finding zip files..."),
+		progressbar.OptionSetDescription("[0 extracted] Finding archive files..."),
 		progressbar.OptionSpinnerType(14),
 		progressbar.OptionSetElapsedTime(true),
 		progressbar.OptionSetPredictTime(true),
@@ -141,38 +153,38 @@ func (e *Extractor) ExtractAll(ctx context.Context, dir string) IOE.IOEither[err
 	}
 	return function.Pipe2(
 		IOE.TryCatchError(func() ([]string, error) {
-			return e.findZipFiles(dir)
+			return e.findArchiveFiles(dir)
 		}),
-		IOE.Chain(func(zipFiles []string) IOE.IOEither[error, []T.Unit] {
+		IOE.Chain(func(archiveFiles []string) IOE.IOEither[error, []T.Unit] {
 			select {
 			case <-ctx.Done():
 				return IOE.Left[[]T.Unit](ctx.Err())
 			default:
 			}
-			e.zipsTotal.Add(ctx, int64(len(zipFiles)),
+			e.archivesTotal.Add(ctx, int64(len(archiveFiles)),
 				metric.WithAttributes(
 					attribute.String("type", "main"),
 				),
 			)
-			if len(zipFiles) == 0 {
-				e.Logger.Infow("No zip files found in directory", "dir", dir)
+			if len(archiveFiles) == 0 {
+				e.Logger.Infow("No archive files found in directory", "dir", dir)
 				return IOE.Right[error]([]T.Unit{})
 			}
 
-			e.Logger.Infow("Found zip files to extract", "count", len(zipFiles), "dir", dir)
+			e.Logger.Infow("Found archive files to extract", "count", len(archiveFiles), "dir", dir)
 			e.progress.Describe(
-				fmt.Sprintf("[0 extracted] Processing %d zip files...", len(zipFiles)),
+				fmt.Sprintf("[0 extracted] Processing %d archive files...", len(archiveFiles)),
 			)
 
-			traverse := IOE.TraverseArrayPar(func(zipPath string) IOE.IOEither[error, T.Unit] {
+			traverse := IOE.TraverseArrayPar(func(archivePath string) IOE.IOEither[error, T.Unit] {
 				select {
 				case <-ctx.Done():
 					return IOE.Left[T.Unit](ctx.Err())
 				default:
-					return e.processSingleZip(ctx, zipPath)
+					return e.processSingleArchive(ctx, archivePath)
 				}
 			})
-			return traverse(zipFiles)
+			return traverse(archiveFiles)
 		}),
 		IOE.Map[error](func(_ []T.Unit) T.Unit {
 			durationMs := time.Since(startTime).Milliseconds()
@@ -199,26 +211,32 @@ func (e *Extractor) ExtractAll(ctx context.Context, dir string) IOE.IOEither[err
 	)
 }
 
-func (e *Extractor) ProcessZipFile(zipPath string) IOE.IOEither[error, T.Unit] {
+func (e *Extractor) ProcessArchiveFile(archivePath string) IOE.IOEither[error, T.Unit] {
 	ctx := context.Background()
-	return e.processSingleZip(ctx, zipPath)
+	return e.processSingleArchive(ctx, archivePath)
 }
 
-func (e *Extractor) processSingleZip(
+func (e *Extractor) processSingleArchive(
 	ctx context.Context,
-	zipPath string,
+	archivePath string,
 ) IOE.IOEither[error, T.Unit] {
-	ctx, span := e.Tracer.Start(ctx, "process.zip", trace.WithAttributes(
-		attribute.String("zip_path", zipPath),
+	archiveType := getArchiveType(archivePath)
+	ctx, span := e.Tracer.Start(ctx, "process.archive", trace.WithAttributes(
+		attribute.String("archive_path", archivePath),
+		attribute.String("archive_type", string(archiveType)),
 	))
 	defer span.End()
 	startTime := time.Now()
-	baseName := strings.TrimSuffix(filepath.Base(zipPath), ".zip")
-	destDir := filepath.Join(filepath.Dir(zipPath), baseName)
-	e.Logger.Infow("Processing zip file",
-		"zip", zipPath,
+	baseName := strings.TrimSuffix(filepath.Base(archivePath), filepath.Ext(archivePath))
+	if archiveType == TarGzType || archiveType == TgzType {
+		baseName = strings.TrimSuffix(baseName, ".tar") // Remove .tar for .tar.gz/.tgz
+	}
+	destDir := filepath.Join(filepath.Dir(archivePath), baseName)
+	e.Logger.Infow("Processing archive file",
+		"archive", archivePath,
 		"baseName", baseName,
 		"destDir", destDir,
+		"archive_type", archiveType,
 	)
 	select {
 	case <-ctx.Done():
@@ -232,10 +250,10 @@ func (e *Extractor) processSingleZip(
 				return T.Unit{}, ctx.Err()
 			default:
 			}
-			e.Logger.Infow("Extracting main archive", "zip", zipPath, "dest", destDir)
-			e.currentArchive = zipPath
-			e.progress.Describe(fmt.Sprintf("Extracting %s", filepath.Base(zipPath)))
-			return T.Unit{}, e.extractZipToDir(zipPath, destDir)
+			e.Logger.Infow("Extracting main archive", "archive", archivePath, "dest", destDir)
+			e.currentArchive = archivePath
+			e.progress.Describe(fmt.Sprintf("Extracting %s", filepath.Base(archivePath)))
+			return T.Unit{}, e.extractToDir(archivePath, destDir, archiveType)
 		}),
 		IOE.Chain(func(_ T.Unit) IOE.IOEither[error, T.Unit] {
 			select {
@@ -243,8 +261,8 @@ func (e *Extractor) processSingleZip(
 				return IOE.Left[T.Unit](ctx.Err())
 			default:
 			}
-			e.progress.Describe(fmt.Sprintf("Extracting nested zips in %s", baseName))
-			return e.extractAllZipsInDir(ctx, destDir)
+			e.progress.Describe(fmt.Sprintf("Extracting nested archives in %s", baseName))
+			return e.extractAllArchivesInDir(ctx, destDir)
 		}),
 		IOE.Chain(func(_ T.Unit) IOE.IOEither[error, T.Unit] {
 			select {
@@ -254,16 +272,16 @@ func (e *Extractor) processSingleZip(
 			}
 			if e.DeleteAfter {
 				return IOE.TryCatchError(func() (T.Unit, error) {
-					if err := os.Remove(zipPath); err != nil {
+					if err := os.Remove(archivePath); err != nil {
 						e.Logger.Warnw(
-							"Failed to delete original zip",
-							"zip",
-							zipPath,
+							"Failed to delete original archive",
+							"archive",
+							archivePath,
 							"error",
 							err,
 						)
 					} else {
-						e.Logger.Infow("Deleted original zip", "zip", zipPath)
+						e.Logger.Infow("Deleted original archive", "archive", archivePath)
 					}
 					return T.Unit{}, nil
 				})
@@ -275,7 +293,7 @@ func (e *Extractor) processSingleZip(
 			e.fileDuration.Record(ctx, durationMs,
 				metric.WithAttributes(
 					attribute.String("status", "success"),
-					attribute.String("type", "zip"),
+					attribute.String("archive_type", string(archiveType)),
 				),
 			)
 			return IOE.Of[error](T.Unit{})
@@ -283,8 +301,22 @@ func (e *Extractor) processSingleZip(
 	)
 }
 
-func (e *Extractor) findZipFiles(dir string) ([]string, error) {
-	var zipFiles []string
+func getArchiveType(path string) ArchiveType {
+	lower := strings.ToLower(path)
+	if strings.HasSuffix(lower, ".zip") {
+		return ZipType
+	} else if strings.HasSuffix(lower, ".tar.gz") {
+		return TarGzType
+	} else if strings.HasSuffix(lower, ".tgz") {
+		return TgzType
+	} else if strings.HasSuffix(lower, ".tar") {
+		return TarType
+	}
+	return UnknownType
+}
+
+func (e *Extractor) findArchiveFiles(dir string) ([]string, error) {
+	var archiveFiles []string
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -292,12 +324,14 @@ func (e *Extractor) findZipFiles(dir string) ([]string, error) {
 	}
 
 	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(strings.ToLower(entry.Name()), ".zip") {
-			zipFiles = append(zipFiles, filepath.Join(dir, entry.Name()))
+		if !entry.IsDir() {
+			if getArchiveType(entry.Name()) != UnknownType {
+				archiveFiles = append(archiveFiles, filepath.Join(dir, entry.Name()))
+			}
 		}
 	}
 
-	return zipFiles, nil
+	return archiveFiles, nil
 }
 
 func (e *Extractor) updateDescription() {
@@ -311,7 +345,7 @@ func (e *Extractor) updateDescription() {
 	}
 }
 
-func (e *Extractor) extractAllZipsInDir(
+func (e *Extractor) extractAllArchivesInDir(
 	ctx context.Context,
 	dir string,
 ) IOE.IOEither[error, T.Unit] {
@@ -319,55 +353,71 @@ func (e *Extractor) extractAllZipsInDir(
 		for {
 			select {
 			case <-ctx.Done():
-				e.Logger.Warn("Nested zip extraction cancelled")
+				e.Logger.Warn("Nested archive extraction cancelled")
 				return T.Unit{}, ctx.Err()
 			default:
 			}
-			zipFiles, err := e.findAllZipFilesRecursive(dir)
+			archiveFiles, err := e.findAllArchiveFilesRecursive(dir)
 			if err != nil {
 				return T.Unit{}, err
 			}
-			if len(zipFiles) == 0 {
+			if len(archiveFiles) == 0 {
 				break
 			}
 
-			e.Logger.Debugw("Found nested zip files", "count", len(zipFiles), "dir", dir)
+			e.Logger.Debugw("Found nested archive files", "count", len(archiveFiles), "dir", dir)
 
-			for _, zipFile := range zipFiles {
+			for _, archiveFile := range archiveFiles {
 				select {
 				case <-ctx.Done():
 					return T.Unit{}, ctx.Err()
 				default:
 				}
-				ctx, span := e.Tracer.Start(ctx, "extract.nested_zip", trace.WithAttributes(
-					attribute.String("zip_file", zipFile),
+				archiveType := getArchiveType(archiveFile)
+				ctx, span := e.Tracer.Start(ctx, "extract.nested_archive", trace.WithAttributes(
+					attribute.String("archive_file", archiveFile),
+					attribute.String("archive_type", string(archiveType)),
 				))
 
-				e.Logger.Infow("Extracting nested zip", "zip", zipFile)
+				e.Logger.Infow(
+					"Extracting nested archive",
+					"archive",
+					archiveFile,
+					"type",
+					archiveType,
+				)
 
-				e.zipsTotal.Add(ctx, 1,
+				e.archivesTotal.Add(ctx, 1,
 					metric.WithAttributes(
 						attribute.String("type", "nested"),
+						attribute.String("archive_type", string(archiveType)),
 					),
 				)
 
-				destDir := filepath.Dir(zipFile)
-				if err := e.extractZipToDir(zipFile, destDir); err != nil {
+				destDir := filepath.Dir(archiveFile)
+				if err := e.extractToDir(archiveFile, destDir, archiveType); err != nil {
 					span.RecordError(err)
 					span.End()
-					e.zipsFailed.Add(ctx, 1,
+					e.archivesFailed.Add(ctx, 1,
 						metric.WithAttributes(
 							attribute.String("error_type", "extract_failed"),
+							attribute.String("archive_type", string(archiveType)),
 						),
 					)
 					return T.Unit{}, err
 				}
 
 				if e.DeleteAfter {
-					if err := os.Remove(zipFile); err != nil {
-						e.Logger.Warnw("Failed to delete zip file", "zip", zipFile, "error", err)
+					if err := os.Remove(archiveFile); err != nil {
+						e.Logger.Warnw(
+							"Failed to delete archive file",
+							"archive",
+							archiveFile,
+							"error",
+							err,
+						)
 					} else {
-						e.Logger.Infow("Deleted zip file", "zip", zipFile)
+						e.Logger.Infow("Deleted archive file", "archive", archiveFile)
 					}
 				}
 
@@ -378,25 +428,38 @@ func (e *Extractor) extractAllZipsInDir(
 	})
 }
 
-func (e *Extractor) findAllZipFilesRecursive(dir string) ([]string, error) {
-	var zipFiles []string
+func (e *Extractor) findAllArchiveFilesRecursive(dir string) ([]string, error) {
+	var archiveFiles []string
 
 	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
-		if !d.IsDir() && strings.HasSuffix(strings.ToLower(d.Name()), ".zip") {
-			zipFiles = append(zipFiles, path)
+		if !d.IsDir() && getArchiveType(d.Name()) != UnknownType {
+			archiveFiles = append(archiveFiles, path)
 		}
 
 		return nil
 	})
 
-	return zipFiles, err
+	return archiveFiles, err
 }
 
-func (e *Extractor) extractZipToDir(zipPath, destDir string) error {
+func (e *Extractor) extractToDir(archivePath, destDir string, archiveType ArchiveType) error {
+	switch archiveType {
+	case ZipType:
+		return e.extractZip(archivePath, destDir)
+	case TarType:
+		return e.extractTar(archivePath, destDir)
+	case TarGzType, TgzType:
+		return e.extractTarGz(archivePath, destDir)
+	default:
+		return fmt.Errorf("unsupported archive type: %s", archiveType)
+	}
+}
+
+func (e *Extractor) extractZip(zipPath, destDir string) error {
 	startTime := time.Now()
 	e.Logger.Debugw("Opening zip file", "zip", zipPath, "dest", destDir)
 
@@ -414,16 +477,20 @@ func (e *Extractor) extractZipToDir(zipPath, destDir string) error {
 		e.updateDescription()
 
 		destPath := filepath.Join(destDir, f.Name)
+		cleanDestPath := filepath.Clean(destPath)
+		if !strings.HasPrefix(cleanDestPath, filepath.Clean(destDir)+string(filepath.Separator)) {
+			return fmt.Errorf("illegal file path: %s", destPath)
+		}
 
 		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(destPath, os.ModePerm); err != nil {
-				return fmt.Errorf("failed to create directory %s: %w", destPath, err)
+			if err := os.MkdirAll(cleanDestPath, f.Mode()|0o700); err != nil { // Preserve mode, ensure dir executable
+				return fmt.Errorf("failed to create directory %s: %w", cleanDestPath, err)
 			}
 			continue
 		}
 
-		if err := os.MkdirAll(filepath.Dir(destPath), os.ModePerm); err != nil {
-			return fmt.Errorf("failed to create parent directory for %s: %w", destPath, err)
+		if err := os.MkdirAll(filepath.Dir(cleanDestPath), os.ModePerm); err != nil {
+			return fmt.Errorf("failed to create parent directory for %s: %w", cleanDestPath, err)
 		}
 
 		rc, err := f.Open()
@@ -431,10 +498,10 @@ func (e *Extractor) extractZipToDir(zipPath, destDir string) error {
 			return fmt.Errorf("failed to open file %s in zip: %w", f.Name, err)
 		}
 
-		destFile, err := os.Create(destPath)
+		destFile, err := os.OpenFile(cleanDestPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode())
 		if err != nil {
 			rc.Close()
-			return fmt.Errorf("failed to create file %s: %w", destPath, err)
+			return fmt.Errorf("failed to create file %s: %w", cleanDestPath, err)
 		}
 
 		n, err := io.Copy(destFile, rc)
@@ -444,6 +511,11 @@ func (e *Extractor) extractZipToDir(zipPath, destDir string) error {
 
 		if err != nil {
 			return fmt.Errorf("failed to copy file %s: %w", f.Name, err)
+		}
+
+		// Preserve timestamp
+		if err := os.Chtimes(cleanDestPath, f.Modified, f.Modified); err != nil {
+			e.Logger.Warnw("Failed to set timestamp", "file", cleanDestPath, "error", err)
 		}
 
 		durationMs := time.Since(startTime).Milliseconds()
@@ -459,9 +531,135 @@ func (e *Extractor) extractZipToDir(zipPath, destDir string) error {
 		e.ExtractedFiles.Add(1)
 		e.updateDescription()
 
-		e.Logger.Debugw("File extracted", "file", f.Name, "dest", destPath)
+		e.Logger.Debugw("File extracted", "file", f.Name, "dest", cleanDestPath)
 	}
 
 	e.Logger.Infow("Zip extraction completed", "zip", zipPath, "files_extracted", len(r.File))
+	return nil
+}
+
+func (e *Extractor) extractTar(tarPath, destDir string) error {
+	file, err := os.Open(tarPath)
+	if err != nil {
+		return fmt.Errorf("failed to open tar %s: %w", tarPath, err)
+	}
+	defer file.Close()
+
+	tr := tar.NewReader(file)
+	return e.extractTarReader(tr, destDir, tarPath)
+}
+
+func (e *Extractor) extractTarGz(tarGzPath, destDir string) error {
+	file, err := os.Open(tarGzPath)
+	if err != nil {
+		return fmt.Errorf("failed to open tar.gz %s: %w", tarGzPath, err)
+	}
+	defer file.Close()
+
+	gzr, err := gzip.NewReader(file)
+	if err != nil {
+		return fmt.Errorf("failed to create gzip reader for %s: %w", tarGzPath, err)
+	}
+	defer gzr.Close()
+
+	tr := tar.NewReader(gzr)
+	return e.extractTarReader(tr, destDir, tarGzPath)
+}
+
+func (e *Extractor) extractTarReader(tr *tar.Reader, destDir, archivePath string) error {
+	startTime := time.Now()
+	e.currentArchive = archivePath
+
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("failed to read tar header: %w", err)
+		}
+
+		e.currentFile = header.Name
+		e.updateDescription()
+
+		destPath := filepath.Join(destDir, header.Name)
+		cleanDestPath := filepath.Clean(destPath)
+		if !strings.HasPrefix(cleanDestPath, filepath.Clean(destDir)+string(filepath.Separator)) {
+			return fmt.Errorf("illegal file path: %s", destPath)
+		}
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(cleanDestPath, os.FileMode(header.Mode)|0o700); err != nil {
+				return fmt.Errorf("failed to create directory %s: %w", cleanDestPath, err)
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(cleanDestPath), os.ModePerm); err != nil {
+				return fmt.Errorf(
+					"failed to create parent directory for %s: %w",
+					cleanDestPath,
+					err,
+				)
+			}
+			destFile, err := os.OpenFile(
+				cleanDestPath,
+				os.O_WRONLY|os.O_CREATE|os.O_TRUNC,
+				os.FileMode(header.Mode),
+			)
+			if err != nil {
+				return fmt.Errorf("failed to create file %s: %w", cleanDestPath, err)
+			}
+			n, err := io.Copy(destFile, tr)
+			destFile.Close()
+			if err != nil {
+				return fmt.Errorf("failed to copy file %s: %w", header.Name, err)
+			}
+			e.bytesTotal.Add(context.Background(), n)
+			e.filesTotal.Add(context.Background(), 1)
+			e.ExtractedFiles.Add(1)
+		case tar.TypeSymlink:
+			// Sanitize link target
+			targetPath := filepath.Clean(filepath.Join(destDir, header.Linkname))
+			if !strings.HasPrefix(targetPath, filepath.Clean(destDir)+string(filepath.Separator)) {
+				e.Logger.Warnw(
+					"Skipping illegal symlink target",
+					"symlink",
+					cleanDestPath,
+					"target",
+					header.Linkname,
+				)
+				continue
+			}
+			if err := os.Symlink(header.Linkname, cleanDestPath); err != nil {
+				return fmt.Errorf("failed to create symlink %s: %w", cleanDestPath, err)
+			}
+		default:
+			e.Logger.Debugw(
+				"Skipping unsupported type",
+				"type",
+				header.Typeflag,
+				"name",
+				header.Name,
+			)
+			continue
+		}
+
+		// Preserve timestamps
+		if err := os.Chtimes(cleanDestPath, header.AccessTime, header.ModTime); err != nil {
+			e.Logger.Warnw("Failed to set timestamp", "file", cleanDestPath, "error", err)
+		}
+
+		e.updateDescription()
+	}
+
+	durationMs := time.Since(startTime).Milliseconds()
+	e.fileDuration.Record(context.Background(), durationMs,
+		metric.WithAttributes(
+			attribute.String("status", "success"),
+			attribute.Bool("nested", false),
+		),
+	)
+
+	e.Logger.Infow("Tar extraction completed", "archive", archivePath)
 	return nil
 }

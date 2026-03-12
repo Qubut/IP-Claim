@@ -1,9 +1,7 @@
 package parse
 
 import (
-	"bufio"
 	"context"
-	"encoding/csv"
 	"fmt"
 	"io/fs"
 	"os"
@@ -21,6 +19,7 @@ import (
 	IOE "github.com/IBM/fp-go/v2/ioeither"
 	"github.com/IBM/fp-go/v2/option"
 	"github.com/antchfx/xmlquery"
+	"github.com/parquet-go/parquet-go"
 	"github.com/schollz/progressbar/v3"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -97,7 +96,7 @@ func NewParser(
 
 	p.recordsTotal, err = meter.Int64Counter(
 		"parse.records.total",
-		metric.WithDescription("Total number of records written to CSV"),
+		metric.WithDescription("Total number of records written to Parquet"),
 	)
 	if err != nil {
 		return nil, err
@@ -124,14 +123,14 @@ func NewParser(
 	return p, nil
 }
 
-func (p *Parser) ParseAllToCSV(
+func (p *Parser) ParseAllToParquet(
 	ctx context.Context,
-	downloadDir, outputCSV string,
+	downloadDir, outputParquet string,
 	maxWorkers int64,
 ) error {
 	ctx, sessionSpan := p.Tracer.Start(ctx, "parse.session", trace.WithAttributes(
 		attribute.String("download_dir", downloadDir),
-		attribute.String("output_csv", outputCSV),
+		attribute.String("output_parquet", outputParquet),
 		attribute.Int64("max_workers", maxWorkers),
 	))
 	defer sessionSpan.End()
@@ -140,9 +139,8 @@ func (p *Parser) ParseAllToCSV(
 	p.Logger.Info(
 		"Starting parsing session",
 		zap.String("download_dir", downloadDir),
-		zap.String("output_csv", outputCSV),
+		zap.String("output_parquet", outputParquet),
 	)
-
 	ctxFind, findSpan := p.Tracer.Start(ctx, "parse.find_xml_files")
 	var xmlFiles []string
 	err := filepath.WalkDir(downloadDir, func(path string, d fs.DirEntry, err error) error {
@@ -182,36 +180,21 @@ func (p *Parser) ParseAllToCSV(
 		progressbar.OptionSetRenderBlankState(true),
 		progressbar.OptionUseANSICodes(true),
 	)
-
-	file, err := os.Create(outputCSV)
+	file, err := os.Create(outputParquet)
 	if err != nil {
 		sessionSpan.RecordError(err)
-		return fmt.Errorf("failed to create CSV: %w", err)
+		return fmt.Errorf("failed to create Parquet file: %w", err)
 	}
 	defer file.Close()
-
-	writer := csv.NewWriter(bufio.NewWriter(file))
-	defer writer.Flush()
-
-	if err := writer.Write([]string{"patent_id", "status", "cpc_list", "citations", "family_patents"}); err != nil {
-		sessionSpan.RecordError(err)
-		return fmt.Errorf("failed to write header: %w", err)
-	}
-
+	writer := parquet.NewGenericWriter[PatentRecord](file)
+	defer writer.Close()
 	var writeMu sync.Mutex
-	safeWrite := func(row []string) error {
+	safeWrite := func(rows []PatentRecord) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
-		return writer.Write(row)
+		_, err := writer.Write(rows)
+		return err
 	}
-
-	safeFlush := func() error {
-		writeMu.Lock()
-		defer writeMu.Unlock()
-		writer.Flush()
-		return writer.Error()
-	}
-
 	sem := semaphore.NewWeighted(maxWorkers)
 	var wg sync.WaitGroup
 	errChan := make(chan error, 1)
@@ -228,16 +211,13 @@ func (p *Parser) ParseAllToCSV(
 		if err := sem.Acquire(ctx, 1); err != nil {
 			return err
 		}
-
 		go func(path string) {
 			defer wg.Done()
 			defer sem.Release(1)
-
 			ctxFile, fileSpan := p.Tracer.Start(ctx, "parse.xml_file", trace.WithAttributes(
 				attribute.String("xml_path", path),
 			))
 			defer fileSpan.End()
-
 			fileStart := time.Now()
 			records := p.processSingleXML(ctxFile, path)()
 			if ET.IsLeft(records) {
@@ -255,13 +235,12 @@ func (p *Parser) ParseAllToCSV(
 				p.updateProgress()
 				return
 			}
-
 			res := F.Pipe3(
 				records,
-				ET.Chain(ET.TraverseArray(func(record [5]string) ET.Either[error, []string] {
-					return ET.FromError(safeWrite)(record[:])
-				})),
-				ET.Map[error](func(records [][]string) uint64 {
+				ET.Chain(func(records []PatentRecord) ET.Either[error, uint64] {
+					if err := safeWrite(records); err != nil {
+						return ET.Left[uint64](err)
+					}
 					count := uint64(len(records))
 					p.recordsTotal.Add(ctxFile, int64(count))
 					p.processedRecords.Add(count)
@@ -269,7 +248,7 @@ func (p *Parser) ParseAllToCSV(
 						"records_processed",
 						trace.WithAttributes(attribute.Int64("count", int64(count))),
 					)
-					return count
+					return ET.Right[error](count)
 				}),
 				ET.MapLeft[uint64](func(err error) error {
 					fileSpan.RecordError(err)
@@ -284,31 +263,17 @@ func (p *Parser) ParseAllToCSV(
 					}
 					return err
 				}),
+				ET.Map[error](func(_ uint64) uint64 { return 0 }),
 			)
-
-			flushErr := safeFlush()
-			if flushErr != nil {
-				fileSpan.RecordError(flushErr)
-				p.xmlFilesFailed.Add(
-					ctxFile,
-					1,
-					metric.WithAttributes(attribute.String("status", "failed")),
-				)
-				select {
-				case errChan <- flushErr:
-				default:
-				}
+			if ET.IsLeft(res) {
 				p.updateProgress()
 				return
 			}
-
-			if ET.IsRight(res) {
-				p.xmlFilesSuccess.Add(
-					ctxFile,
-					1,
-					metric.WithAttributes(attribute.String("status", "success")),
-				)
-			}
+			p.xmlFilesSuccess.Add(
+				ctxFile,
+				1,
+				metric.WithAttributes(attribute.String("status", "success")),
+			)
 			durationMs := time.Since(fileStart).Milliseconds()
 			p.fileDuration.Record(
 				ctxFile,
@@ -358,7 +323,7 @@ func (p *Parser) updateProgress() {
 func (p *Parser) processSingleXML(
 	ctx context.Context,
 	xmlPath string,
-) IOE.IOEither[error, [][5]string] {
+) IOE.IOEither[error, []PatentRecord] {
 	ctx, span := p.Tracer.Start(
 		ctx,
 		"parse.process_xml",
@@ -403,14 +368,14 @@ func (p *Parser) processSingleXML(
 				return xmlquery.QueryAll(doc, "//*[local-name()='exchange-document']")
 			})
 		}),
-		IOE.Chain(IOE.TraverseArray(func(node *xmlquery.Node) IOE.IOEither[error, [5]string] {
+		IOE.Chain(IOE.TraverseArray(func(node *xmlquery.Node) IOE.IOEither[error, PatentRecord] {
 			select {
 			case <-ctx.Done():
-				return IOE.Left[[5]string](ctx.Err())
+				return IOE.Left[PatentRecord](ctx.Err())
 			default:
 				res, err := exchangeDocumentFromNode(node)
 				if err != nil {
-					return IOE.Left[[5]string](err)
+					return IOE.Left[PatentRecord](err)
 				}
 				return IOE.Right[error](res)
 			}
@@ -419,13 +384,13 @@ func (p *Parser) processSingleXML(
 	return records
 }
 
-func exchangeDocumentFromNode(node *xmlquery.Node) ([5]string, error) {
+func exchangeDocumentFromNode(node *xmlquery.Node) (PatentRecord, error) {
 	country := node.SelectAttr("country")
 	docNumber := node.SelectAttr("doc-number")
 	kind := node.SelectAttr("kind")
 	status := node.SelectAttr("status")
 	if country == "" || docNumber == "" || kind == "" || status == "" {
-		return [5]string{}, fmt.Errorf("missing required attributes")
+		return PatentRecord{}, fmt.Errorf("missing required attributes")
 	}
 	classifications := F.Pipe2(
 		IOE.TryCatchError(func() ([]*xmlquery.Node, error) {
@@ -465,25 +430,32 @@ func exchangeDocumentFromNode(node *xmlquery.Node) ([5]string, error) {
 		}),
 		IOE.Chain(IOE.TraverseArray(func(n *xmlquery.Node) IOE.IOEither[error, Citation] {
 			categories := F.Pipe2(
-            xmlquery.Find(n, "*[local-name()='category'] | *[local-name()='rel-passage']/*[local-name()='category']"),
-            array.Map(func(c *xmlquery.Node) string {
-                return strings.TrimSpace(c.InnerText())
-            }),
-            array.Filter(func(s string) bool {
-                return s != ""
-            }),
-        )
-
-			citedID := F.Pipe2(option.FromNillable(xmlquery.FindOne(n, "*[local-name()='patcit']/*[local-name()='document-id']")), option.Map(func(docIDNode *xmlquery.Node) string {
-				c := getText(docIDNode, "*[local-name()='country']")
-				d := getText(docIDNode, "*[local-name()='doc-number']")
-				k := getText(docIDNode, "*[local-name()='kind']")
-				if !(c == "" && d == "" && k == "") {
-					return c + d + k
-				}
-				return ""
-			}), option.GetOrElse(func() string { return "" }))
-
+				xmlquery.Find(
+					n,
+					"*[local-name()='category'] | *[local-name()='rel-passage']/*[local-name()='category']",
+				),
+				array.Map(func(c *xmlquery.Node) string {
+					return strings.TrimSpace(c.InnerText())
+				}),
+				array.Filter(func(s string) bool {
+					return s != ""
+				}),
+			)
+			citedID := F.Pipe2(
+				option.FromNillable(
+					xmlquery.FindOne(n, "*[local-name()='patcit']/*[local-name()='document-id']"),
+				),
+				option.Map(func(docIDNode *xmlquery.Node) string {
+					c := getText(docIDNode, "*[local-name()='country']")
+					d := getText(docIDNode, "*[local-name()='doc-number']")
+					k := getText(docIDNode, "*[local-name()='kind']")
+					if !(c == "" && d == "" && k == "") {
+						return c + d + k
+					}
+					return ""
+				}),
+				option.GetOrElse(func() string { return "" }),
+			)
 			return IOE.Right[error](Citation{CitedID: citedID, Categories: categories})
 		})),
 		IOE.GetOrElse(func(_ error) IO.IO[[]Citation] {
@@ -541,7 +513,6 @@ func exchangeDocumentFromNode(node *xmlquery.Node) ([5]string, error) {
 			return IO.Of([]FamilyMember{})
 		}),
 	)()
-
 	doc := ExchangeDocument{
 		Country:               country,
 		DocNumber:             docNumber,
@@ -552,7 +523,6 @@ func exchangeDocumentFromNode(node *xmlquery.Node) ([5]string, error) {
 		FamilyMembers:         familyMembers,
 	}
 	patentID := doc.Country + doc.DocNumber + doc.Kind
-
 	cpcSet := make(map[string]struct{})
 	for _, pc := range doc.PatentClassifications {
 		if pc.Scheme == "CPCI" {
@@ -565,21 +535,9 @@ func exchangeDocumentFromNode(node *xmlquery.Node) ([5]string, error) {
 		cpcList = append(cpcList, symbol)
 	}
 	sort.Strings(cpcList)
-	cpcStr := strings.Join(cpcList, ";")
-
-	citationsStr := F.Pipe2(
-		doc.Citations,
-		array.Chain(func(c Citation) []string {
-			if c.CitedID != "" {
-				cats := strings.Join(c.Categories, ",")
-				return []string{fmt.Sprintf("%s (%s)", c.CitedID, cats)}
-			}
-			return []string{}
-		}),
-		func(citations []string) string {
-			return strings.Join(citations, ";")
-		},
-	)
+	filteredCitations := array.Filter(func(c Citation) bool {
+		return c.CitedID != ""
+	})(doc.Citations)
 	familySet := make(map[string]struct{})
 	for _, fm := range doc.FamilyMembers {
 		for _, pr := range fm.PublicationReferences {
@@ -596,8 +554,13 @@ func exchangeDocumentFromNode(node *xmlquery.Node) ([5]string, error) {
 		familyList = append(familyList, fid)
 	}
 	sort.Strings(familyList)
-	familyStr := strings.Join(familyList, ";")
-	return [5]string{patentID, doc.Status, cpcStr, citationsStr, familyStr}, nil
+	return PatentRecord{
+		PatentID:      patentID,
+		Status:        doc.Status,
+		CPCList:       cpcList,
+		Citations:     filteredCitations,
+		FamilyPatents: familyList,
+	}, nil
 }
 
 func getText(parent *xmlquery.Node, selector string) string {

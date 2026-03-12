@@ -16,7 +16,7 @@ download:
   enabled: true
   hupd:
     url: "https://huggingface.co/datasets/HUPD/hupd/resolve/main/data/all-years.tar"
-    filename: hupd_all-years.tar
+    filename: data/hupd_all-years.tar
     enabled: true
 
 extract:
@@ -25,7 +25,7 @@ extract:
 
 parse:
   enabled: true
-  output_csv: "./data_full.csv"
+  output_csv: "./data.parquet"
   workers: 300
 
 telemetry:
