@@ -4,7 +4,8 @@
 
 APP_NAME     := epo-processor
 BINARY_NAME  := $(APP_NAME)
-MAIN_PACKAGE := ./cmd/$(APP_NAME)
+# Go package directories use underscores; the user-facing binary keeps the hyphen.
+MAIN_PACKAGE := ./cmd/epo_processor
 VERSION      := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT       := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME   := $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')

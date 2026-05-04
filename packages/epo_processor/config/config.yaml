@@ -2,34 +2,50 @@ log:
   log_level: info
   log_dir: logs
 
-server: # epo server
+# EPO BDDS source — only consumed by `epo-processor process`.
+server:
   base_url: "https://publication-bdds.apps.epo.org/bdds/bdds-bff-service/prod/api/public"
   product_id: 3
   max_retries: 5
   timeout: 30s
-  concurrent_downloads: 5 # min:1, max:30
-
-download:
-  directory: "data"
-  skip_exists: true
   verify_sha1: true
-  enabled: true
-  hupd:
-    url: "https://huggingface.co/datasets/HUPD/hupd/resolve/main/data/all-years.tar"
-    filename: data/hupd_all-years.tar
-    enabled: true
 
-extract:
-  enabled: true
-  delete_after_extract: true
+# HUPD .tar source — only consumed by `epo-processor process-hupd`.
+hupd:
+  url: "https://huggingface.co/datasets/HUPD/hupd/resolve/main/data/all-years.tar"
+  filename: data/hupd_all-years.tar
 
-parse:
-  enabled: true
-  output_csv: "./data.parquet"
-  workers: 300
+# analyze command configuration.
+analyze:
+  hupd_meta_url: "https://huggingface.co/datasets/HUPD/hupd/resolve/main/hupd_metadata_2022-02-22.feather"
+
+# Streaming end-to-end pipeline. Shared by both subcommands.
+pipeline:
+  archive_concurrency: 4       # how many archives to download/parse in parallel
+  extractor_concurrency: 4     # parallel XML extractors per archive batch
+  batch_size: 1000             # rows per Parquet write
+  batch_timeout: 2s            # flush partial batch after this idle period
+  output_parquet: "./data.parquet"
+  row_group_size: 50000        # rows per Parquet row group; bounds RAM / paces disk I/O
+  spool_dir: ""                # zip-only fallback (defaults to OS temp)
+  use_local_dir: ""            # if set, replay archives from this dir, no network
+
+  # Retention policies (orthogonal). Both default to false: fully streaming.
+  keep_archive: false          # write the raw archive (HTTP body) to archive_dir
+  archive_dir: "data/archives" # required when keep_archive=true
+  keep_extracted: false        # tee selected entries to extracted_dir while reading
+  extracted_dir: "data/xml"    # required when keep_extracted=true
+
+  # Resumable processing. When set, completed-archive IDs are persisted in
+  # an embedded bbolt file (https://github.com/etcd-io/bbolt). On restart,
+  # already-processed archives are skipped at the source. Leave empty to
+  # disable (Null Object — same behaviour as a non-checkpointed run).
+  checkpoint_db: "data/.epo-state.db"
 
 telemetry:
-  enabled: true
+  # Disabled by default — set to `true` (and run an OTLP collector at the
+  # endpoint below, e.g. via `docker compose up -d`) to ship traces/metrics.
+  enabled: false
   exporter: otlp
   endpoint: localhost:4317
   protocol: grpc
