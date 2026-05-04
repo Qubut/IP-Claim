@@ -226,3 +226,8 @@ devenv.local.nix
 target
 
 downloads
+
+*.parquet
+
+# go
+.go/
