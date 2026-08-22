@@ -35,13 +35,16 @@ const (
 	KindZip
 )
 
-// XMLEntry is a single XML payload found inside an archive.
-// The consumer must call [XMLEntry.Close] when done reading.
+// XMLEntry is a single XML payload found inside an archive. The walker
+// buffers the (small) payload in memory and emits it without holding the
+// container stream open, so entries from one archive can be parsed
+// concurrently. Calling [XMLEntry.Close] is still required (it is a no-op for
+// buffered entries) to keep the consumer contract uniform.
 type XMLEntry struct {
 	ArchiveName string    // name of the enclosing archive (may be a "!" chain for nested archives)
 	Name        string    // path of this entry within the archive
-	Size        int64     // uncompressed byte count; -1 when unknown
-	Reader      io.Reader // entry body; valid until Close is called
+	Size        int64     // payload byte count
+	Reader      io.Reader // in-memory entry body; independent of the container stream
 	closer      func() error
 }
 

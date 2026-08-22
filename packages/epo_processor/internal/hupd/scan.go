@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,7 +16,6 @@ import (
 	IOResF "github.com/IBM/fp-go/v2/idiomatic/ioresult/file"
 	P "github.com/IBM/fp-go/v2/predicate"
 	"github.com/destel/rill"
-	"go.uber.org/zap"
 )
 
 // Header captures the only HUPD JSON fields needed for ID matching.
@@ -40,7 +40,7 @@ func ScanIDs(
 	workers int,
 	bar ProgressReporter,
 	mu *sync.Mutex,
-	log *zap.SugaredLogger,
+	log *slog.Logger,
 ) (map[string][]string, error) {
 	type pathRec struct {
 		path string
@@ -79,9 +79,11 @@ func ScanIDs(
 	var (
 		filesSeen  int64
 		lastLogged time.Time
+		lastBar    time.Time
 	)
+	start := time.Now()
 	mu.Lock()
-	bar.Describe("[cyan]HUPD scan[reset]")
+	bar.Describe("HUPD scan")
 	mu.Unlock()
 
 	if err := rill.ForEach(recs, 1, func(rec pathRec) error {
@@ -89,12 +91,18 @@ func ScanIDs(
 		for _, id := range A.Filter(P.IsNonZero[string]())(rec.ids[:]) {
 			out[id] = append(out[id], rec.path)
 		}
-		if now := time.Now(); now.Sub(lastLogged) >= ProgressEvery {
-			lastLogged = now
+		now := time.Now()
+		if now.Sub(lastBar) >= BarEvery {
+			lastBar = now
+			rate := float64(filesSeen) / now.Sub(start).Seconds()
 			mu.Lock()
-			_ = bar.Set64(filesSeen)
+			bar.Describe(fmt.Sprintf("HUPD scan \u2014 files %s \u00b7 ids %s \u00b7 %s",
+				FmtCount(filesSeen), FmtCount(int64(len(out))), FmtRate(rate)))
 			mu.Unlock()
-			log.Infow("analyze: HUPD progress", "files_seen", filesSeen, "ids_kept", len(out))
+		}
+		if now.Sub(lastLogged) >= ProgressEvery {
+			lastLogged = now
+			log.Info("analyze: HUPD progress", "files_seen", filesSeen, "ids_kept", len(out))
 		}
 		return nil
 	}); err != nil {
@@ -117,7 +125,7 @@ func ReadIDs(path string) ([2]string, error) {
 			}
 			return [2]string{
 				NormalizeHUPDPatentNumber(h.PatentNumber),
-				NormalizeUSID(HUPDDateSuffixRE.ReplaceAllString(h.PublicationNumber, "")),
+				NormalizeHUPDPublication(h.PublicationNumber),
 			}, nil
 		}
 	})()

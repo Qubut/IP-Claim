@@ -5,21 +5,25 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
+	F "github.com/IBM/fp-go/v2/function"
+	"github.com/IBM/fp-go/v2/option"
 	O "github.com/IBM/fp-go/v2/ord"
 	"github.com/IBM/fp-go/v2/record"
 	"github.com/destel/rill"
 	bolt "go.etcd.io/bbolt"
-	"go.uber.org/zap"
 )
 
-// whenLog calls fn with log when log is non-nil.
-func whenLog(log *zap.SugaredLogger, fn func(*zap.SugaredLogger)) {
-	if log != nil {
-		fn(log)
-	}
+// whenLog calls fn with log when log is non-nil, modelling the nilable
+// logger as an Option and running the effect only on Some.
+func whenLog(log *slog.Logger, fn func(*slog.Logger)) {
+	F.Pipe1(
+		option.FromNillable(log),
+		option.Map(func(l *slog.Logger) any { fn(l); return nil }),
+	)
 }
 
 // Checkpointer records which archive jobs have been fully processed so
@@ -129,6 +133,7 @@ func (b *BoltCheckpointer) MarkCompleted(id string, meta map[string]string) erro
 
 // Close flushes and closes the underlying bbolt database.
 func (b *BoltCheckpointer) Close() error { return b.db.Close() }
+
 // HasAny returns true when the checkpoint bucket contains at least one entry.
 func (b *BoltCheckpointer) HasAny() (bool, error) {
 	var found bool
@@ -150,11 +155,11 @@ func (b *BoltCheckpointer) HasAny() (bool, error) {
 type CheckpointSource struct {
 	Inner  ArchiveSource
 	CP     Checkpointer
-	Logger *zap.SugaredLogger
+	Logger *slog.Logger
 }
 
 // NewCheckpointSource constructs a CheckpointSource.
-func NewCheckpointSource(inner ArchiveSource, cp Checkpointer, log *zap.SugaredLogger) *CheckpointSource {
+func NewCheckpointSource(inner ArchiveSource, cp Checkpointer, log *slog.Logger) *CheckpointSource {
 	return &CheckpointSource{Inner: inner, CP: cp, Logger: log}
 }
 
@@ -163,14 +168,14 @@ func (c *CheckpointSource) Stream(ctx context.Context) <-chan rill.Try[ArchiveJo
 	return rill.Filter(c.Inner.Stream(ctx), 1, func(j ArchiveJob) (bool, error) {
 		done, err := c.CP.IsCompleted(jobID(j))
 		if err != nil {
-			whenLog(c.Logger, func(l *zap.SugaredLogger) {
-				l.Warnw("checkpoint: read failed, will reprocess", "name", j.Name, "err", err)
+			whenLog(c.Logger, func(l *slog.Logger) {
+				l.Warn("checkpoint: read failed, will reprocess", "name", j.Name, "err", err)
 			})
 			return true, nil
 		}
 		if done {
-			whenLog(c.Logger, func(l *zap.SugaredLogger) {
-				l.Infow("checkpoint: skipping completed", "name", j.Name)
+			whenLog(c.Logger, func(l *slog.Logger) {
+				l.Info("checkpoint: skipping completed", "name", j.Name)
 			})
 			return false, nil
 		}
@@ -191,19 +196,19 @@ func (c *CheckpointSource) Stream(ctx context.Context) <-chan rill.Try[ArchiveJo
 // output to a fresh shard so previous output is preserved.
 type CheckpointJanitor struct {
 	CP     Checkpointer
-	Logger *zap.SugaredLogger
+	Logger *slog.Logger
 }
 
 // OnArchiveDone marks j completed in CP after the opener finishes draining it.
 func (c CheckpointJanitor) OnArchiveDone(_ context.Context, j ArchiveJob, _ string, _ bool) {
 	if err := c.CP.MarkCompleted(jobID(j), map[string]string{"name": j.Name}); err != nil {
-		whenLog(c.Logger, func(l *zap.SugaredLogger) {
-			l.Warnw("checkpoint: mark failed", "name", j.Name, "err", err)
+		whenLog(c.Logger, func(l *slog.Logger) {
+			l.Warn("checkpoint: mark failed", "name", j.Name, "err", err)
 		})
 		return
 	}
-	whenLog(c.Logger, func(l *zap.SugaredLogger) {
-		l.Infow("checkpoint: archive marked complete", "name", j.Name)
+	whenLog(c.Logger, func(l *slog.Logger) {
+		l.Info("checkpoint: archive marked complete", "name", j.Name)
 	})
 }
 

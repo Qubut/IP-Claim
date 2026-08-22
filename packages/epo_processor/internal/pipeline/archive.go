@@ -3,6 +3,7 @@ package pipeline
 import (
 	"archive/tar"
 	"archive/zip"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"fmt"
@@ -12,6 +13,11 @@ import (
 
 	"github.com/destel/rill"
 )
+
+// maxEntryPrealloc caps the buffer pre-allocation hint so a bogus or huge
+// declared size cannot trigger a giant allocation. Selected entries are XML
+// payloads (small); anything larger simply grows on demand.
+const maxEntryPrealloc = 64 << 20
 
 // streamArchive emits an XMLEntry for every XML payload found in r,
 // recursing into nested archives. The caller owns r; internal readers
@@ -160,28 +166,25 @@ func dispatchEntry(
 ) error {
 	switch {
 	case cfg.selector()(entryName):
-		reader, closeKept, err := cfg.teeIfKeep(archiveName, entryName, r)
+		// Buffer the (small, XML) entry fully so the walker can advance to the
+		// next entry immediately instead of blocking until the consumer has
+		// parsed it. This decouples the strictly-sequential container read
+		// (tar can't seek; zip is walked in order) from the parallel XML parse,
+		// letting a single archive feed many concurrent parsers. Backpressure
+		// is preserved by the downstream stream: send blocks when every parser
+		// is busy, bounding in-flight entries (and thus memory).
+		buf, err := bufferEntry(cfg, archiveName, entryName, size, r)
 		if err != nil {
 			sendErr(err)
 			return nil
 		}
-		// Block until the consumer closes the entry to preserve backpressure.
-		done := make(chan struct{})
 		send(XMLEntry{
 			ArchiveName: archiveName,
 			Name:        entryName,
-			Size:        size,
-			Reader:      reader,
-			closer: func() error {
-				close(done)
-				return closeKept()
-			},
+			Size:        int64(len(buf)),
+			Reader:      bytes.NewReader(buf),
+			closer:      noopCloser,
 		})
-		select {
-		case <-done:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
 		return nil
 
 	case DetectKind(entryName) != KindUnknown:
@@ -196,6 +199,28 @@ func dispatchEntry(
 		_, _ = io.Copy(io.Discard, r)
 		return nil
 	}
+}
+
+// bufferEntry reads the entry fully into memory, teeing it to disk first when
+// KeepExtracted is enabled (reading through the tee is what flushes the kept
+// file). The kept file is closed before returning, so nothing in the emitted
+// XMLEntry references the container stream.
+func bufferEntry(cfg WalkConfig, archive, entry string, size int64, r io.Reader) ([]byte, error) {
+	reader, closeKept, err := cfg.teeIfKeep(archive, entry, r)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = closeKept() }()
+
+	prealloc := 0
+	if size > 0 && size < maxEntryPrealloc {
+		prealloc = int(size)
+	}
+	buf := bytes.NewBuffer(make([]byte, 0, prealloc))
+	if _, err := buf.ReadFrom(reader); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // resolvedSpoolDir returns d (created if missing) or os.TempDir() if empty.

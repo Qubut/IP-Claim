@@ -29,6 +29,18 @@ func ExampleNormalizeHUPDPatentNumber() {
 	// 9114971
 }
 
+func ExampleNormalizeHUPDPublication() {
+	// HUPD stores publication numbers in USPTO format (11-digit body) with a
+	// trailing application date. EPO/DOCDB uses a 10-digit body, dropping the
+	// serial's leading zero. NormalizeHUPDPublication reconciles them so a HUPD
+	// publication and the matching EPO patent_id collapse to the same stem.
+	fmt.Println(hupd.NormalizeHUPDPublication("US20100138160A1-20100603"))
+	fmt.Println(hupd.NormalizeUSID("US2010138160A1")) // EPO patent_id, same stem
+	// Output:
+	// 2010138160
+	// 2010138160
+}
+
 func ExampleNormalizeFamily() {
 	// Filters a family-member list to US-normalised numeric IDs only.
 	// Non-US identifiers and unparseable entries are silently dropped.

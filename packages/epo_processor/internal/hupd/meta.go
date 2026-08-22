@@ -4,18 +4,17 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
-	F "github.com/IBM/fp-go/v2/function"
 	"github.com/apache/arrow/go/v18/arrow"
 	"github.com/apache/arrow/go/v18/arrow/array"
 	"github.com/apache/arrow/go/v18/arrow/ipc"
 	"github.com/apache/arrow/go/v18/arrow/memory"
-	"go.uber.org/zap"
 )
 
 // EnsureMeta downloads the HUPD metadata Feather file from metaURL to
@@ -31,7 +30,7 @@ func EnsureMeta(
 	metaPath, metaURL string,
 	bar ProgressReporter,
 	mu *sync.Mutex,
-	log *zap.SugaredLogger,
+	log *slog.Logger,
 ) error {
 	if _, err := os.Stat(metaPath); err == nil {
 		return nil // already on disk
@@ -40,9 +39,9 @@ func EnsureMeta(
 		return fmt.Errorf("mkdir for feather: %w", err)
 	}
 
-	log.Infow("analyze: downloading HUPD metadata feather", "url", metaURL, "dst", metaPath)
+	log.Info("analyze: downloading HUPD metadata feather", "url", metaURL, "dst", metaPath)
 	mu.Lock()
-	bar.Describe("[cyan]downloading HUPD meta[reset]")
+	bar.Describe("downloading HUPD meta")
 	mu.Unlock()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL, nil)
@@ -65,7 +64,8 @@ func EnsureMeta(
 	tmpPath := tmp.Name()
 
 	var downloaded int64
-	var lastLogged time.Time
+	var lastLogged, lastBar time.Time
+	start := time.Now()
 	buf := make([]byte, 1<<20)
 	for {
 		n, readErr := resp.Body.Read(buf)
@@ -76,12 +76,19 @@ func EnsureMeta(
 				return werr
 			}
 			downloaded += int64(n)
-			if now := time.Now(); now.Sub(lastLogged) >= ProgressEvery {
-				lastLogged = now
+			now := time.Now()
+			if now.Sub(lastBar) >= BarEvery {
+				lastBar = now
+				mib := downloaded >> 20
+				rate := float64(mib) / now.Sub(start).Seconds()
 				mu.Lock()
-				_ = bar.Set64(downloaded >> 20)
+				bar.Describe(fmt.Sprintf("downloading HUPD meta \u2014 %s MiB \u00b7 %s",
+					FmtCount(mib), FmtRate(rate)))
 				mu.Unlock()
-				log.Infow("analyze: download progress", "mib", downloaded>>20)
+			}
+			if now.Sub(lastLogged) >= ProgressEvery {
+				lastLogged = now
+				log.Info("analyze: download progress", "mib", downloaded>>20)
 			}
 		}
 		if readErr == io.EOF {
@@ -101,7 +108,7 @@ func EnsureMeta(
 		_ = os.Remove(tmpPath)
 		return err
 	}
-	log.Infow("analyze: feather downloaded", "path", metaPath, "mib", downloaded>>20)
+	log.Info("analyze: feather downloaded", "path", metaPath, "mib", downloaded>>20)
 	return nil
 }
 
@@ -123,7 +130,7 @@ func ScanMeta(
 	metaPath, metaURL, hupdDir string,
 	bar ProgressReporter,
 	mu *sync.Mutex,
-	log *zap.SugaredLogger,
+	log *slog.Logger,
 ) (map[string][]string, error) {
 	if err := EnsureMeta(ctx, metaPath, metaURL, bar, mu, log); err != nil {
 		return nil, err
@@ -168,7 +175,7 @@ func ScanMeta(
 		return nil, err
 	}
 
-	log.Infow("analyze: feather schema",
+	log.Info("analyze: feather schema",
 		"application_number_type", schema.Field(appIdx).Type,
 		"patent_number_type", schema.Field(patIdx).Type,
 		"filing_date_type", schema.Field(dateIdx).Type,
@@ -177,20 +184,14 @@ func ScanMeta(
 	)
 
 	mu.Lock()
-	bar.Describe("[cyan]HUPD meta[reset]")
+	bar.Describe("HUPD meta")
 	mu.Unlock()
 
 	out := make(map[string][]string, 5_000_000)
 	var total int64
-	var lastLogged time.Time
+	var lastLogged, lastBar time.Time
+	start := time.Now()
 	epoch := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
-
-	stripAndNormPub := func(s string) string {
-		return F.Pipe2(s,
-			func(v string) string { return HUPDDateSuffixRE.ReplaceAllString(v, "") },
-			NormalizeUSID,
-		)
-	}
 
 	addIDs := func(path string, ids []string) {
 		for _, id := range ids {
@@ -222,18 +223,24 @@ func ScanMeta(
 			path := filepath.Join(hupdDir, year, year, appNum+".json")
 			addIDs(path, []string{
 				NormalizeHUPDPatentNumber(patFn(row)),
-				stripAndNormPub(pubFn(row)),
+				NormalizeHUPDPublication(pubFn(row)),
 			})
 			total++
 		}
 		rec.Release()
 
-		if now := time.Now(); now.Sub(lastLogged) >= ProgressEvery {
-			lastLogged = now
+		now := time.Now()
+		if now.Sub(lastBar) >= BarEvery {
+			lastBar = now
+			rate := float64(total) / now.Sub(start).Seconds()
 			mu.Lock()
-			_ = bar.Set64(total)
+			bar.Describe(fmt.Sprintf("HUPD meta \u2014 rows %s \u00b7 %s",
+				FmtCount(total), FmtRate(rate)))
 			mu.Unlock()
-			log.Infow("analyze: meta progress", "rows", total, "ids_kept", len(out))
+		}
+		if now.Sub(lastLogged) >= ProgressEvery {
+			lastLogged = now
+			log.Info("analyze: meta progress", "rows", total, "ids_kept", len(out))
 		}
 	}
 

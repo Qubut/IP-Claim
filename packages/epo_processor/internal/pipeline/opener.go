@@ -7,15 +7,17 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
 	"time"
 
+	F "github.com/IBM/fp-go/v2/function"
 	IOR "github.com/IBM/fp-go/v2/idiomatic/ioresult"
+	O "github.com/IBM/fp-go/v2/option"
 	"github.com/IBM/fp-go/v2/retry"
 	"github.com/destel/rill"
-	"go.uber.org/zap"
 )
 
 // HTTPOpener fetches each archive over HTTP and feeds it to the shared
@@ -36,7 +38,7 @@ type HTTPOpener struct {
 
 	// Logger, when non-nil, receives structured warnings (e.g. for
 	// unsupported archive kinds).
-	Logger *zap.SugaredLogger
+	Logger *slog.Logger
 
 	// Janitor receives a per-archive completion notification after the
 	// stream is fully drained without error. Defaults to NoopJanitor.
@@ -47,6 +49,13 @@ type HTTPOpener struct {
 	// server omits Content-Length. Called from the producer goroutine;
 	// must not block.
 	OnBytes func(job ArchiveJob, downloaded, total int64)
+
+	// OnArchiveSettled, when non-nil, is invoked exactly once per archive
+	// after it terminally succeeds (err == nil) or fails after retries
+	// (err != nil). Lets a progress display retire the archive's bar and
+	// the summary collector tally failures. Called from the producer
+	// goroutine; must not block.
+	OnArchiveSettled func(job ArchiveJob, err error)
 
 	// ProgressInterval throttles OnBytes calls. Defaults to 100ms.
 	ProgressInterval time.Duration
@@ -69,15 +78,13 @@ func NewHTTPOpener(client *http.Client, maxRetries uint, verifySHA1 bool, walk W
 	}
 }
 
-// Stream issues the GET, runs the archive walk under Bracket+Retrying,
+// Stream issues the GET, runs the archive walk, retries on error,
 // and notifies the Janitor on success.
 func (o *HTTPOpener) Stream(ctx context.Context, job ArchiveJob) rill.Stream[XMLEntry] {
 	return rill.Generate(func(send func(XMLEntry), sendErr func(error)) {
-		// Unsupported archive kinds (e.g. .csv siblings) yield empty
-		// streams; sibling archives keep flowing.
 		if DetectKind(job.Name) == KindUnknown {
-			whenLog(o.Logger, func(l *zap.SugaredLogger) {
-				l.Warnw("archive: skipping unsupported kind", "name", job.Name)
+			whenLog(o.Logger, func(l *slog.Logger) {
+				l.Debug("archive: skipping unsupported kind", "name", job.Name)
 			})
 			return
 		}
@@ -97,13 +104,36 @@ func (o *HTTPOpener) Stream(ctx context.Context, job ArchiveJob) rill.Stream[XML
 		check := func(_ struct{}, err error) bool {
 			return err != nil && ctx.Err() == nil
 		}
-		_, err := IOR.Retrying(policy, fetch, check)()
-		if err != nil {
-			sendErr(err)
-			return
-		}
-		o.Janitor.OnArchiveDone(ctx, job, "", o.KeepArchive)
+		F.Pipe1(
+			IOR.Retrying(policy, fetch, check),
+			IOR.Fold(
+				func(err error) IOR.IO[struct{}] {
+					return func() struct{} {
+						whenLog(o.Logger, func(l *slog.Logger) {
+							l.Warn("archive: failed after retries, skipping (will retry next run)",
+								"name", job.Name, "err", err)
+						})
+						o.settled(job, err)
+						return struct{}{}
+					}
+				},
+				func(struct{}) IOR.IO[struct{}] {
+					return func() struct{} {
+						o.Janitor.OnArchiveDone(ctx, job, "", o.KeepArchive)
+						o.settled(job, nil)
+						return struct{}{}
+					}
+				},
+			),
+		)()
 	})
+}
+
+// settled invokes OnArchiveSettled when set; centralises the nil-check.
+func (o *HTTPOpener) settled(job ArchiveJob, err error) {
+	if o.OnArchiveSettled != nil {
+		o.OnArchiveSettled(job, err)
+	}
 }
 
 // acquire issues the GET and returns the *http.Response on a 200, or an
@@ -162,21 +192,28 @@ func (o *HTTPOpener) consume(
 		// Drain trailing bytes so the SHA-1 / kept-archive tee covers the
 		// full stream even if the walker exited early.
 		_, _ = io.Copy(io.Discard, bodyReader)
-		if h != nil {
-			// Hex digests are case-insensitive (RFC 4648 §8).
-			if actual := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(actual, job.Checksum) {
-				return struct{}{}, fmt.Errorf(
-					"checksum mismatch for %s: want %s got %s",
-					job.Name, job.Checksum, actual,
-				)
-			}
-		}
+		// Verify SHA-1 at the end. On mismatch: warn and keep the records
+		F.Pipe4(
+			h,
+			O.FromPredicate(func(hh hash.Hash) bool { return hh != nil }),
+			O.Map(func(hh hash.Hash) string { return hex.EncodeToString(hh.Sum(nil)) }),
+			O.Filter(func(actual string) bool { return !strings.EqualFold(actual, job.Checksum) }),
+			O.Fold(
+				F.Constant(struct{}{}),
+				func(actual string) struct{} {
+					whenLog(o.Logger, func(l *slog.Logger) {
+						l.Warn("archive: checksum mismatch, keeping records anyway",
+							"name", job.Name, "want", job.Checksum, "got", actual)
+					})
+					return struct{}{}
+				},
+			),
+		)
 		return struct{}{}, nil
 	}
 }
 
-// releaseResponse closes the HTTP response body. Curried per the
-// [IOR.Bracket] release-callback shape.
+// releaseResponse closes the HTTP response body.
 func releaseResponse(_ struct{}, _ error) func(*http.Response) IOR.IOResult[any] {
 	return func(resp *http.Response) IOR.IOResult[any] {
 		return func() (any, error) {
@@ -192,7 +229,7 @@ func releaseResponse(_ struct{}, _ error) func(*http.Response) IOR.IOResult[any]
 // same walker as HTTPOpener. Useful for re-runs without re-downloading.
 type LocalFileOpener struct {
 	Walk    WalkConfig
-	Logger  *zap.SugaredLogger
+	Logger  *slog.Logger
 	Janitor Janitor
 }
 
@@ -210,8 +247,8 @@ func (l *LocalFileOpener) Stream(ctx context.Context, job ArchiveJob) rill.Strea
 			path = job.Name
 		}
 		if DetectKind(path) == KindUnknown {
-			whenLog(l.Logger, func(lg *zap.SugaredLogger) {
-				lg.Warnw("archive: skipping unsupported kind", "name", job.Name)
+			whenLog(l.Logger, func(lg *slog.Logger) {
+				lg.Debug("archive: skipping unsupported kind", "name", job.Name)
 			})
 			return
 		}

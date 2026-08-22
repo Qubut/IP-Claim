@@ -10,7 +10,28 @@ import (
 	IO "github.com/IBM/fp-go/v2/io"
 	"github.com/IBM/fp-go/v2/option"
 	O "github.com/IBM/fp-go/v2/ord"
+	R "github.com/IBM/fp-go/v2/result"
 	"github.com/antchfx/xmlquery"
+	"github.com/antchfx/xpath"
+)
+
+// Precompiled XPath expressions. xmlquery's string-based Find/FindOne/QueryAll
+// route through a process-global, mutex-guarded LRU cache; precompiling once
+// and using QuerySelector(All) bypasses that lock entirely, which is what lets
+// ExtractPatentRecord scale across many goroutines.
+var (
+	xpClassifications = xpath.MustCompile(".//*[local-name()='patent-classification']")
+	xpClassScheme     = xpath.MustCompile("*[local-name()='classification-scheme']")
+	xpClassSymbol     = xpath.MustCompile("*[local-name()='classification-symbol']")
+	xpCitations       = xpath.MustCompile(".//*[local-name()='references-cited']/*[local-name()='citation']")
+	xpCategories      = xpath.MustCompile("*[local-name()='category'] | *[local-name()='rel-passage']/*[local-name()='category']")
+	xpPatcitDocID     = xpath.MustCompile("*[local-name()='patcit']/*[local-name()='document-id']")
+	xpFamilyMembers   = xpath.MustCompile(".//*[local-name()='patent-family']/*[local-name()='family-member']")
+	xpPubReference    = xpath.MustCompile("*[local-name()='publication-reference']")
+	xpDocumentID      = xpath.MustCompile("*[local-name()='document-id']")
+	xpCountry         = xpath.MustCompile("*[local-name()='country']")
+	xpDocNumber       = xpath.MustCompile("*[local-name()='doc-number']")
+	xpKind            = xpath.MustCompile("*[local-name()='kind']")
 )
 
 // ExtractPatentRecord parses an EPO exchange-document XML node into a
@@ -24,39 +45,51 @@ func exchangeDocumentFromNode(node *xmlquery.Node) (PatentRecord, error) {
 	docNumber := node.SelectAttr("doc-number")
 	kind := node.SelectAttr("kind")
 	status := node.SelectAttr("status")
-	if country == "" || docNumber == "" || kind == "" || status == "" {
-		return PatentRecord{}, fmt.Errorf("missing required attributes")
+	// Validate all required attributes; short-circuit on the first missing
+	// one with an error naming which attribute it was.
+	req := func(name, val string) R.Result[string] {
+		if val == "" {
+			return R.Left[string](fmt.Errorf("missing required attribute %q", name))
+		}
+		return R.Of(val)
 	}
-	classifications := extractAll(node, ".//*[local-name()='patent-classification']",
+	if _, err := R.UnwrapError(R.SequenceT4(
+		req("country", country),
+		req("doc-number", docNumber),
+		req("kind", kind),
+		req("status", status),
+	)); err != nil {
+		return PatentRecord{}, err
+	}
+	classifications := extractAll(node, xpClassifications,
 		func(n *xmlquery.Node) IOR.IOResult[PatentClassification] {
-			schemeNode := xmlquery.FindOne(n, "*[local-name()='classification-scheme']")
-			if schemeNode == nil {
-				return IOR.Left[PatentClassification](
-					fmt.Errorf("missing classification-scheme"),
-				)
-			}
-			scheme := schemeNode.SelectAttr("scheme")
-			if scheme == "" {
-				return IOR.Left[PatentClassification](fmt.Errorf("missing scheme attribute"))
-			}
-			symbolNode := xmlquery.FindOne(n, "*[local-name()='classification-symbol']")
-			if symbolNode == nil {
-				return IOR.Left[PatentClassification](
-					fmt.Errorf("missing classification-symbol"),
-				)
-			}
-			symbol := strings.TrimSpace(symbolNode.InnerText())
-			return IOR.Of(
-				PatentClassification{Scheme: scheme, ClassificationSymbol: symbol},
+			pc := F.Pipe3(
+				option.FromNillable(xmlquery.QuerySelector(n, xpClassScheme)),
+				option.Map(func(s *xmlquery.Node) string { return s.SelectAttr("scheme") }),
+				option.Filter(func(scheme string) bool { return scheme != "" }),
+				option.Chain(func(scheme string) option.Option[PatentClassification] {
+					return F.Pipe1(
+						option.FromNillable(xmlquery.QuerySelector(n, xpClassSymbol)),
+						option.Map(func(sym *xmlquery.Node) PatentClassification {
+							return PatentClassification{
+								Scheme:               scheme,
+								ClassificationSymbol: strings.TrimSpace(sym.InnerText()),
+							}
+						}),
+					)
+				}),
 			)
+			return option.Fold(
+				func() IOR.IOResult[PatentClassification] {
+					return IOR.Left[PatentClassification](fmt.Errorf("incomplete patent-classification"))
+				},
+				IOR.Of[PatentClassification],
+			)(pc)
 		})
-	citations := extractAll(node, ".//*[local-name()='references-cited']/*[local-name()='citation']",
+	citations := extractAll(node, xpCitations,
 		func(n *xmlquery.Node) IOR.IOResult[Citation] {
 			categories := F.Pipe2(
-				xmlquery.Find(
-					n,
-					"*[local-name()='category'] | *[local-name()='rel-passage']/*[local-name()='category']",
-				),
+				xmlquery.QuerySelectorAll(n, xpCategories),
 				array.Map(func(c *xmlquery.Node) string {
 					return strings.TrimSpace(c.InnerText())
 				}),
@@ -66,12 +99,12 @@ func exchangeDocumentFromNode(node *xmlquery.Node) (PatentRecord, error) {
 			)
 			citedID := F.Pipe2(
 				option.FromNillable(
-					xmlquery.FindOne(n, "*[local-name()='patcit']/*[local-name()='document-id']"),
+					xmlquery.QuerySelector(n, xpPatcitDocID),
 				),
 				option.Map(func(docIDNode *xmlquery.Node) string {
-					c := getText(docIDNode, "*[local-name()='country']")
-					d := getText(docIDNode, "*[local-name()='doc-number']")
-					k := getText(docIDNode, "*[local-name()='kind']")
+					c := getText(docIDNode, xpCountry)
+					d := getText(docIDNode, xpDocNumber)
+					k := getText(docIDNode, xpKind)
 					if c != "" || d != "" || k != "" {
 						return c + d + k
 					}
@@ -81,40 +114,38 @@ func exchangeDocumentFromNode(node *xmlquery.Node) (PatentRecord, error) {
 			)
 			return IOR.Of(Citation{CitedID: citedID, Categories: categories})
 		})
-	familyMembers := extractAll(node, ".//*[local-name()='patent-family']/*[local-name()='family-member']",
+	familyMembers := extractAll(node, xpFamilyMembers,
 		func(familyNode *xmlquery.Node) IOR.IOResult[FamilyMember] {
-			listRefs := IOR.IOResult[[]*xmlquery.Node](func() ([]*xmlquery.Node, error) {
-				return xmlquery.QueryAll(
-					familyNode,
-					"*[local-name()='publication-reference']",
-				)
-			})
 			refs := F.Pipe1(
-				listRefs,
-				IOR.Chain(
-					IOR.TraverseArray(
-						func(pr *xmlquery.Node) IOR.IOResult[PublicationReference] {
-							dataFormat := pr.SelectAttr("data-format")
-							if dataFormat == "" {
-								return IOR.Left[PublicationReference](
-									fmt.Errorf("missing data-format attribute"),
-								)
-							}
-							docIDNode := xmlquery.FindOne(pr, "*[local-name()='document-id']")
-							if docIDNode == nil {
-								return IOR.Left[PublicationReference](
-									fmt.Errorf("no document-id found"),
-								)
-							}
-							c := getText(docIDNode, "*[local-name()='country']")
-							d := getText(docIDNode, "*[local-name()='doc-number']")
-							k := getText(docIDNode, "*[local-name()='kind']")
-							return IOR.Of(PublicationReference{
-								DataFormat: dataFormat,
-								DocumentID: DocumentID{Country: c, DocNumber: d, Kind: k},
-							})
-						},
-					),
+				xmlquery.QuerySelectorAll(familyNode, xpPubReference),
+				IOR.TraverseArray(
+					func(pr *xmlquery.Node) IOR.IOResult[PublicationReference] {
+						docID := F.Pipe1(
+							option.FromNillable(xmlquery.QuerySelector(pr, xpDocumentID)),
+							option.Map(func(idNode *xmlquery.Node) DocumentID {
+								return DocumentID{
+									Country:   getText(idNode, xpCountry),
+									DocNumber: getText(idNode, xpDocNumber),
+									Kind:      getText(idNode, xpKind),
+								}
+							}),
+						)
+						pubRef := F.Pipe2(
+							pr.SelectAttr("data-format"),
+							option.FromPredicate(func(df string) bool { return df != "" }),
+							option.Chain(func(df string) option.Option[PublicationReference] {
+								return option.Map(func(id DocumentID) PublicationReference {
+									return PublicationReference{DataFormat: df, DocumentID: id}
+								})(docID)
+							}),
+						)
+						return option.Fold(
+							func() IOR.IOResult[PublicationReference] {
+								return IOR.Left[PublicationReference](fmt.Errorf("incomplete publication-reference"))
+							},
+							IOR.Of[PublicationReference],
+						)(pubRef)
+					},
 				),
 			)
 			return IOR.MonadMap(refs, func(refs []PublicationReference) FamilyMember {
@@ -166,28 +197,25 @@ func exchangeDocumentFromNode(node *xmlquery.Node) (PatentRecord, error) {
 	}, nil
 }
 
-func getText(parent *xmlquery.Node, selector string) string {
-	n := xmlquery.FindOne(parent, selector)
+func getText(parent *xmlquery.Node, expr *xpath.Expr) string {
+	n := xmlquery.QuerySelector(parent, expr)
 	if n == nil {
 		return ""
 	}
 	return strings.TrimSpace(n.InnerText())
 }
 
-// extractAll runs an XPath query against node and applies elem to each
-// matched element. Any failure (the query itself, or any element)
-// degrades the whole subsection to an empty slice (best-effort parsing).
+// extractAll runs a precompiled XPath query against node and applies elem to
+// each matched element. Any per-element failure degrades the whole subsection
+// to an empty slice (best-effort parsing).
 func extractAll[T any](
 	node *xmlquery.Node,
-	xpath string,
+	expr *xpath.Expr,
 	elem func(*xmlquery.Node) IOR.IOResult[T],
 ) []T {
-	list := IOR.IOResult[[]*xmlquery.Node](func() ([]*xmlquery.Node, error) {
-		return xmlquery.QueryAll(node, xpath)
-	})
 	return F.Pipe2(
-		list,
-		IOR.Chain(IOR.TraverseArray(elem)),
+		xmlquery.QuerySelectorAll(node, expr),
+		IOR.TraverseArray(elem),
 		IOR.GetOrElse(func(_ error) IO.IO[[]T] { return IO.Of([]T{}) }),
 	)()
 }
