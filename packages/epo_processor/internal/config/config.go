@@ -13,15 +13,14 @@ import (
 // Config is the root configuration object. Each subsection is a value
 // type so it can be passed around freely; viper validates on Load().
 type Config struct {
-	Log       Log       `mapstructure:"log"       validate:"required"`
-	Telemetry Telemetry `mapstructure:"telemetry" validate:"required"`
-	Server    Server    `mapstructure:"server"`
-	HUPD      HUPD      `mapstructure:"hupd"`
-	Analyze   Analyze   `mapstructure:"analyze"`
-	Pipeline  Pipeline  `mapstructure:"pipeline"`
+	Log      Log      `mapstructure:"log"      validate:"required"`
+	Server   Server   `mapstructure:"server"`
+	HUPD     HUPD     `mapstructure:"hupd"`
+	Analyze  Analyze  `mapstructure:"analyze"`
+	Pipeline Pipeline `mapstructure:"pipeline"`
 }
 
-// Log configures the zap logger (level and output directory).
+// Log configures the slog logger (level and output directory).
 type Log struct {
 	// LogLevel controls the minimum severity emitted.
 	// Accepted values (case-insensitive): debug, info, warn, error.
@@ -30,29 +29,6 @@ type Log struct {
 	// LogDir is the directory where the JSON log file is written.
 	// An empty string disables file logging (console logging is unaffected).
 	LogDir string `mapstructure:"log_dir"`
-}
-
-// Telemetry configures the optional OpenTelemetry exporter.
-// Set Enabled=false to run without any OTel dependency.
-type Telemetry struct {
-	// Enabled gates all telemetry. When false the processor uses no-op
-	// tracer and meter providers and skips all exporter setup.
-	Enabled bool `mapstructure:"enabled"`
-	// Exporter selects the wire format. Currently only "otlp" is wired.
-	Exporter string `mapstructure:"exporter"`
-	// Endpoint is the OTel collector address (host:port or full URL).
-	// Required when Exporter="otlp".
-	Endpoint string `mapstructure:"endpoint"`
-	// Protocol is "grpc" (default) or "http/protobuf".
-	Protocol string `mapstructure:"protocol"`
-	// Insecure disables TLS for the exporter connection. Default: true.
-	Insecure bool `mapstructure:"insecure"`
-	// Headers are extra key/value pairs forwarded with every export call
-	// (useful for auth tokens on managed collectors).
-	Headers map[string]string `mapstructure:"headers"`
-	// ServiceName appears as the OTel resource attribute service.name.
-	// Default: "epo-processor".
-	ServiceName string `mapstructure:"service_name"`
 }
 
 // Server points the EPO product source at the live BDDS API. Only
@@ -96,9 +72,24 @@ type Pipeline struct {
 	// ArchiveConcurrency is the number of archives fetched and walked
 	// in parallel. Default: 4.
 	ArchiveConcurrency int `mapstructure:"archive_concurrency"`
-	// ExtractorConcurrency is the number of parallel XML decoders per
-	// archive batch. Default: 4.
+	// ExtractorConcurrency is the number of archive entries decoded in
+	// parallel (one sequential, CPU-bound XML reader each) — the knob that
+	// saturates cores. 0 (or negative) means auto: runtime.NumCPU() clamped
+	// by MemoryBudgetGB / PerEntryEstimateMB. Default: 0 (auto).
 	ExtractorConcurrency int `mapstructure:"extractor_concurrency"`
+	// ParserConcurrency is the number of goroutines that run the CPU-bound
+	// per-document parse in parallel within each entry. Since the reader is
+	// sequential, a small value (just enough to overlap parse with read) is
+	// sufficient. 0 (or negative) defaults to a small internal constant.
+	ParserConcurrency int `mapstructure:"parser_concurrency"`
+	// MemoryBudgetGB caps the RAM devoted to concurrent readers when
+	// ExtractorConcurrency is auto (0). Each in-flight reader buffers a
+	// decompressed XML stream plus the current DOM node. Default: 32.
+	MemoryBudgetGB int `mapstructure:"memory_budget_gb"`
+	// PerEntryEstimateMB is the conservative per-reader working-set estimate
+	// used to clamp auto ExtractorConcurrency against MemoryBudgetGB.
+	// Default: 256.
+	PerEntryEstimateMB int `mapstructure:"per_entry_estimate_mb"`
 	// BatchSize is the number of PatentRecords per sink Write call.
 	// Default: 1000.
 	BatchSize int `mapstructure:"batch_size"`
@@ -141,10 +132,13 @@ type Pipeline struct {
 }
 
 // Load reads config from file/env/flags/defaults and validates it.
-// flags is optional; when non-nil every flag is bound to the local viper
-// using its name with dashes replaced by underscores within each section
-// (e.g. "pipeline.reset-checkpoint" -> "pipeline.reset_checkpoint").
-func Load(cfgFile string, flags *pflag.FlagSet) (Config, error) {
+//
+// binds maps a CLI flag name to its dotted viper config key (e.g.
+// "archive-concurrency" -> "pipeline.archive_concurrency"). Only flags
+// listed in binds are bound to config; this keeps short, command-local
+// flag names decoupled from the (stable) config-file/env key schema.
+// Either argument may be nil/empty.
+func Load(cfgFile string, flags *pflag.FlagSet, binds map[string]string) (Config, error) {
 	v := viper.New()
 	v.AutomaticEnv()
 	v.SetEnvPrefix("EPO")
@@ -163,15 +157,11 @@ func Load(cfgFile string, flags *pflag.FlagSet) (Config, error) {
 	applyDefaults(v)
 
 	if flags != nil {
-		flags.VisitAll(func(f *pflag.Flag) {
-			// Only bind namespaced flags (e.g. "pipeline.reset-checkpoint");
-			// top-level cobra flags like --config / --help are not config keys.
-			if !strings.Contains(f.Name, ".") {
-				return
+		for name, key := range binds {
+			if f := flags.Lookup(name); f != nil {
+				_ = v.BindPFlag(key, f)
 			}
-			key := strings.ReplaceAll(f.Name, "-", "_")
-			_ = v.BindPFlag(key, f)
-		})
+		}
 	}
 
 	if err := v.ReadInConfig(); err != nil {
@@ -187,9 +177,6 @@ func Load(cfgFile string, flags *pflag.FlagSet) (Config, error) {
 	if err := validator.New().Struct(&cfg); err != nil {
 		return Config{}, fmt.Errorf("validation failed: %w", err)
 	}
-	if cfg.Telemetry.Enabled && cfg.Telemetry.Exporter == "otlp" && cfg.Telemetry.Endpoint == "" {
-		return Config{}, fmt.Errorf("telemetry.endpoint is required when using otlp exporter")
-	}
 	return cfg, nil
 }
 
@@ -199,17 +186,14 @@ func applyDefaults(v *viper.Viper) {
 	for k, val := range map[string]any{
 		"log.log_level":                  "info",
 		"log.log_dir":                    "logs",
-		"telemetry.enabled":              true,
-		"telemetry.exporter":             "otlp",
-		"telemetry.endpoint":             "localhost:4317",
-		"telemetry.protocol":             "grpc",
-		"telemetry.insecure":             true,
-		"telemetry.service_name":         "epo-processor",
 		"server.timeout":                 30 * time.Second,
 		"server.max_retries":             3,
 		"server.product_id":              3,
 		"pipeline.archive_concurrency":   4,
-		"pipeline.extractor_concurrency": 4,
+		"pipeline.extractor_concurrency": 0,
+		"pipeline.parser_concurrency":    2,
+		"pipeline.memory_budget_gb":      32,
+		"pipeline.per_entry_estimate_mb": 256,
 		"pipeline.batch_size":            1000,
 		"pipeline.batch_timeout":         2 * time.Second,
 		"pipeline.output_parquet":        "./data.parquet",

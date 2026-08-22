@@ -6,9 +6,9 @@ log:
 server:
   base_url: "https://publication-bdds.apps.epo.org/bdds/bdds-bff-service/prod/api/public"
   product_id: 3
-  max_retries: 5
+  max_retries: 2
   timeout: 30s
-  verify_sha1: true
+  verify_sha1: false
 
 # HUPD .tar source — only consumed by `epo-processor process-hupd`.
 hupd:
@@ -21,12 +21,15 @@ analyze:
 
 # Streaming end-to-end pipeline. Shared by both subcommands.
 pipeline:
-  archive_concurrency: 4       # how many archives to download/parse in parallel
-  extractor_concurrency: 4     # parallel XML extractors per archive batch
-  batch_size: 1000             # rows per Parquet write
+  archive_concurrency: 16       # how many archives to download/walk in parallel (just needs to keep readers fed)
+  extractor_concurrency: 0      # in-flight entries decoded in parallel (the core-saturating knob); 0 = auto: NumCPU clamped by the memory budget below
+  parser_concurrency: 2         # per-document parse workers within each entry (reader is sequential, so small is enough; 0 = internal default)
+  memory_budget_gb: 32          # RAM ceiling for concurrent readers when extractor_concurrency is auto
+  per_entry_estimate_mb: 256    # conservative per-reader working set; auto readers = min(NumCPU, memory_budget_gb*1024 / per_entry_estimate_mb)
+  batch_size: 100000             # rows per Parquet write
   batch_timeout: 2s            # flush partial batch after this idle period
   output_parquet: "./data.parquet"
-  row_group_size: 50000        # rows per Parquet row group; bounds RAM / paces disk I/O
+  row_group_size: 500000        # rows per Parquet row group; bounds RAM / paces disk I/O
   spool_dir: ""                # zip-only fallback (defaults to OS temp)
   use_local_dir: ""            # if set, replay archives from this dir, no network
 
@@ -41,14 +44,3 @@ pipeline:
   # already-processed archives are skipped at the source. Leave empty to
   # disable (Null Object — same behaviour as a non-checkpointed run).
   checkpoint_db: "data/.epo-state.db"
-
-telemetry:
-  # Disabled by default — set to `true` (and run an OTLP collector at the
-  # endpoint below, e.g. via `docker compose up -d`) to ship traces/metrics.
-  enabled: false
-  exporter: otlp
-  endpoint: localhost:4317
-  protocol: grpc
-  insecure: true
-  service_name: epo_processor
-  headers:

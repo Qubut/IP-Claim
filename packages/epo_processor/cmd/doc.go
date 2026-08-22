@@ -5,9 +5,6 @@
 //
 // Each subcommand in this package composes the same five-stage streaming
 // pipeline from [github.com/Qubut/IP-Claim/packages/epo_processor/internal/pipeline]
-// using Functional Options. The shared concerns — config loading, logging,
-// OpenTelemetry bootstrap, signal handling — are wired once in root.go and
-// made available to every subcommand via cobra's PersistentPreRunE hook.
 //
 // # Subcommands
 //
@@ -50,10 +47,9 @@
 // # Shared wiring (root.go)
 //
 //  1. [internal/config.LoadConfig] merges YAML + env-vars.
-//  2. A zap development logger is attached to stderr (console).
-//  3. A rotating JSON file logger is attached when log.log_dir is set.
-//  4. OpenTelemetry is bootstrapped when telemetry.enabled is true.
-//  5. os.Signal listeners for SIGINT / SIGTERM cancel the pipeline context.
+//  2. A slog text logger is attached to stderr (console).
+//  3. A slog JSON file logger is attached when log.log_dir is set.
+//  4. os.Signal listeners for SIGINT / SIGTERM cancel the pipeline context.
 //
 // # Design patterns
 //

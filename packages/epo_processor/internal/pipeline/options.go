@@ -2,9 +2,8 @@ package pipeline
 
 import (
 	"errors"
+	"log/slog"
 	"time"
-
-	"go.uber.org/zap"
 )
 
 // Stats is a monotonically-increasing snapshot of pipeline counters.
@@ -35,15 +34,18 @@ type Options struct {
 	// Janitor receives per-archive and per-entry lifecycle notifications.
 	// Defaults to NoopJanitor.
 	Janitor Janitor
-	// Logger receives structured pipeline events. Defaults to zap no-op.
-	Logger *zap.SugaredLogger
+	// Logger receives structured pipeline events. Defaults to a discard logger.
+	Logger *slog.Logger
 	// Progress is called on every counter update. Defaults to no-op.
 	Progress ProgressFunc
 	// ArchiveConcurrency is the number of archives in flight simultaneously.
 	// Default: 4.
 	ArchiveConcurrency int
-	// ExtractorConcurrency is the number of parallel XML decoders per
-	// archive batch. Default: 4.
+	// ExtractorConcurrency is the number of in-flight entries decoded in
+	// parallel (one sequential, CPU-bound reader each) — the knob that
+	// saturates cores. Auto-sizing (NumCPU clamped by a memory budget) is a
+	// caller policy: resolve it with PlanReaderConcurrency before passing it
+	// here. Values <= 0 fall back to a minimal safe default. Default: 4.
 	ExtractorConcurrency int
 	// BatchSize is the target number of records per sink Write call.
 	// Default: 1000.
@@ -73,8 +75,8 @@ func WithSink(s RecordSink) Option { return func(o *Options) { o.Sink = s } }
 func WithJanitor(j Janitor) Option { return func(o *Options) { o.Janitor = j } }
 
 // WithLogger sets the structured logger.
-// Default: zap no-op (no output).
-func WithLogger(l *zap.SugaredLogger) Option { return func(o *Options) { o.Logger = l } }
+// Default: a discard logger (no output).
+func WithLogger(l *slog.Logger) Option { return func(o *Options) { o.Logger = l } }
 
 // WithProgress sets the progress callback, called on every counter update.
 // Default: no-op.
@@ -84,8 +86,9 @@ func WithProgress(f ProgressFunc) Option { return func(o *Options) { o.Progress 
 // Values ≤ 0 are treated as 4.
 func WithArchiveConcurrency(n int) Option { return func(o *Options) { o.ArchiveConcurrency = n } }
 
-// WithExtractorConcurrency sets the number of parallel extractors per archive batch.
-// Values ≤ 0 are treated as 4.
+// WithExtractorConcurrency sets the number of in-flight entries decoded in
+// parallel. Auto-sizing is a caller concern (see PlanReaderConcurrency); this
+// only applies a minimal safe fallback for values ≤ 0.
 func WithExtractorConcurrency(n int) Option {
 	return func(o *Options) { o.ExtractorConcurrency = n }
 }
@@ -116,7 +119,7 @@ func (o *Options) defaults() {
 		o.Janitor = NoopJanitor{}
 	}
 	if o.Logger == nil {
-		o.Logger = zap.NewNop().Sugar()
+		o.Logger = slog.New(slog.DiscardHandler)
 	}
 	if o.Progress == nil {
 		o.Progress = func(Stats) {}

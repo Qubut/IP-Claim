@@ -31,8 +31,9 @@ is cited in the EPO corpus.
 - **Overlap analysis** — `analyze` indexes a HUPD extraction (via Feather
   metadata or a JSON directory scan) and reports direct + family-graph matches
   against any EPO Parquet/CSV output.
-- **Structured observability** — `go.uber.org/zap` file logger + OpenTelemetry
-  traces and metrics via a single `telemetry.enabled: true` toggle.
+- **Structured logging & summaries** — stdlib `log/slog` (human-readable text on
+  stderr plus optional JSON log file) with fp-go logging combinators threaded in,
+  and an end-of-run summary table rendered via `jedib0t/go-pretty`.
 
 ## Table of Contents
 
@@ -249,14 +250,6 @@ pipeline:
 
   checkpoint_db:      data/.epo-state.db   # empty → disable resume
   reset_checkpoint:   false                # wipe state + output on startup
-
-telemetry:
-  enabled:      false
-  exporter:     otlp
-  endpoint:     localhost:4317
-  protocol:     grpc              # grpc | http/protobuf
-  insecure:     true
-  service_name: epo_processor
 ```
 
 ---
@@ -366,4 +359,4 @@ MIT — see [LICENSE](LICENSE).
 | IBM/fp-go | https://github.com/IBM/fp-go |
 | parquet-go | https://github.com/parquet-go/parquet-go |
 | bbolt | https://github.com/etcd-io/bbolt |
-| go.uber.org/zap | https://github.com/uber-go/zap |
+| jedib0t/go-pretty | https://github.com/jedib0t/go-pretty |

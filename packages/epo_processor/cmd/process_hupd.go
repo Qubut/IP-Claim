@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -29,21 +29,34 @@ func hupdMaxRetries(serverMaxRetries int) uint {
 	return uint(serverMaxRetries)
 }
 
+func init() {
+	flagStr(processHupdCmd, "hupd.url", "url", "u", "", "HUPD .tar URL")
+	flagStr(processHupdCmd, "hupd.filename", "filename", "", "", "Archive name used in logs/checkpoint")
+	flagBool(processHupdCmd, "pipeline.keep_archive", "keep-archive", "", false, "Also keep the raw .tar under --archive-dir")
+	flagStr(processHupdCmd, "pipeline.archive_dir", "archive-dir", "", "", "Where to keep the raw .tar (with --keep-archive)")
+	flagStr(processHupdCmd, "pipeline.spool_dir", "spool-dir", "", "", "Zip spool dir (defaults to OS temp)")
+	flagInt(processHupdCmd, "pipeline.extractor_concurrency", "extract-concurrency", "", 4, "Parallel extractors")
+	flagInt(processHupdCmd, "server.max_retries", "max-retries", "", 3, "Max HTTP retries")
+}
+
 var processHupdCmd = &cobra.Command{
-	Use:   "process-hupd",
+	Use:   "process-hupd <out-dir>",
 	Short: "Stream the HUPD .tar to disk (archive + unwrapped contents), no parsing",
-		RunE: func(_ *cobra.Command, _ []string) error {
+	Long: "Stream the HUPD all-years .tar from HuggingFace and write its unwrapped\n" +
+		"entries under <out-dir>. Pass --keep-archive to also retain the raw .tar.",
+	Args: cobra.ExactArgs(1),
+	RunE: func(_ *cobra.Command, args []string) error {
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
 
+		// The positional <out-dir> is the extraction target; selecting it
+		// implies retention, so process-hupd is never a no-op.
+		cfg.Pipeline.ExtractedDir = args[0]
+		cfg.Pipeline.KeepExtracted = true
+
 		hupd := cfg.HUPD
 		if strings.TrimSpace(hupd.URL) == "" {
-			return fmt.Errorf("download.hupd.url is empty")
-		}
-		if !cfg.Pipeline.KeepArchive && !cfg.Pipeline.KeepExtracted {
-			return fmt.Errorf(
-				"process-hupd is a no-op unless pipeline.keep_archive or pipeline.keep_extracted is true",
-			)
+			return fmt.Errorf("HUPD URL is empty: pass --url or set hupd.url in config")
 		}
 
 		walk := pipeline.WalkConfig{
@@ -68,20 +81,22 @@ var processHupdCmd = &cobra.Command{
 		opener.ArchiveDir = cfg.Pipeline.ArchiveDir
 		opener.Logger = logger
 
-		bar := newProgressBar("[cyan]downloading HUPD[reset]")
-		var (
-			barMu      sync.Mutex
-			lastLogged time.Time
-		)
+		disp := newDisplay(ctx)
+		tty := disp.active()
+		if tty {
+			logCtl.Console.SetTTYMode(disp.writer())
+			defer logCtl.Console.Restore()
+		}
+		bar := disp.singleBar("downloading HUPD")
+		defer disp.stop()
+
+		lastStats := newRef(pipeline.Stats{})
+		lastLogged := newRef(time.Time{})
 		opener.OnBytes = func(job pipeline.ArchiveJob, downloaded, total int64) {
-			barMu.Lock()
-			defer barMu.Unlock()
-			bar.Describe(fmt.Sprintf("[cyan]HUPD[reset] %s  [white]%s[reset]",
-				job.Name, fmtBytes(downloaded, total)))
-			_ = bar.Set64(downloaded)
-			if now := time.Now(); now.Sub(lastLogged) >= 5*time.Second {
-				lastLogged = now
-				logger.Infow("download: progress", "label", job.Name, "bytes", fmtBytes(downloaded, total))
+			bar.Describe(fmt.Sprintf("HUPD %s  %s", job.Name, fmtBytes(downloaded, total)))
+			if now := time.Now(); now.Sub(lastLogged.Get()()) >= 5*time.Second {
+				lastLogged.Set(now)()
+				logger.Info("download: progress", "label", job.Name, "bytes", fmtBytes(downloaded, total))
 			}
 		}
 
@@ -97,27 +112,44 @@ var processHupdCmd = &cobra.Command{
 			pipeline.WithSink(pipeline.NoopSink{}),
 			pipeline.WithLogger(logger),
 			pipeline.WithArchiveConcurrency(1), // single archive
-			pipeline.WithExtractorConcurrency(cfg.Pipeline.ExtractorConcurrency),
+			pipeline.WithExtractorConcurrency(resolveReaderConcurrency()),
 			pipeline.WithBatchSize(1),
 			pipeline.WithBatchTimeout(cfg.Pipeline.BatchTimeout),
+			pipeline.WithProgress(func(s pipeline.Stats) { lastStats.Set(s)() }),
 		)
 		if err != nil {
 			return fmt.Errorf("build pipeline: %w", err)
 		}
 
-		logger.Infow("Streaming HUPD",
+		logger.Info("Streaming HUPD",
 			"url", hupd.URL,
 			"keep_archive", cfg.Pipeline.KeepArchive,
 			"archive_dir", cfg.Pipeline.ArchiveDir,
 			"keep_extracted", cfg.Pipeline.KeepExtracted,
 			"extracted_dir", cfg.Pipeline.ExtractedDir,
 		)
-		if err := p.Run(ctx); err != nil {
-			_ = bar.Finish()
-			return fmt.Errorf("hupd pipeline: %w", err)
+		started := time.Now()
+		runErr := p.Run(ctx)
+		disp.stop()
+		if tty {
+			logCtl.Console.Restore()
 		}
-		_ = bar.Finish()
+		if runErr != nil {
+			return fmt.Errorf("hupd pipeline: %w", runErr)
+		}
+		elapsed := time.Since(started)
 		logger.Info("HUPD streaming complete")
+
+		final := lastStats.Get()()
+		renderSummary("HUPD process — summary", []kv{
+			{"Archives", strconv.FormatInt(final.Archives, 10)},
+			{"Entries", strconv.FormatInt(final.Entries, 10)},
+			{"Archive dir", cfg.Pipeline.ArchiveDir},
+			{"Extracted dir", cfg.Pipeline.ExtractedDir},
+			{"Elapsed", elapsed.Round(time.Millisecond).String()},
+			{"Entries/s", fmt.Sprintf("%.1f", ratePerSec(final.Entries, elapsed))},
+		})
+		renderIssues(logCtl)
 		return nil
 	},
 }

@@ -3,58 +3,70 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
 	"github.com/IBM/fp-go/v2/array"
 	F "github.com/IBM/fp-go/v2/function"
-	"github.com/mattn/go-isatty"
+	IOR "github.com/IBM/fp-go/v2/idiomatic/ioresult"
 	"github.com/parquet-go/parquet-go"
-	"github.com/schollz/progressbar/v3"
 	"github.com/spf13/cobra"
-	"go.uber.org/zap"
 
 	"github.com/Qubut/IP-Claim/packages/epo_processor/internal/pipeline"
 )
 
-// progressBar abstracts the TUI progress bar so the command code never
-// has to nil-check it. Real bar in TTY, noopProgressBar otherwise.
-type progressBar interface {
-	Describe(string)
-	Set64(int64) error
-	Finish() error
+func init() {
+	// Pipeline output / tuning.
+	flagStr(processCmd, "pipeline.output_parquet", "out", "o", "./data.parquet", "Parquet output path")
+	flagInt(processCmd, "pipeline.archive_concurrency", "concurrency", "c", 4, "Parallel archive downloads/walks")
+	flagInt(processCmd, "pipeline.extractor_concurrency", "extract-concurrency", "", 4, "Archive entries decoded in parallel")
+	flagInt(processCmd, "pipeline.parser_concurrency", "parser-concurrency", "", 0, "Per-document parse workers per entry (0 = NumCPU)")
+	flagInt(processCmd, "pipeline.batch_size", "batch-size", "", 1000, "Rows per Parquet write")
+	flagDur(processCmd, "pipeline.batch_timeout", "batch-timeout", "", 2*time.Second, "Idle flush timeout")
+	flagInt(processCmd, "pipeline.row_group_size", "row-group-size", "", 50000, "Records per Parquet row group (caps RAM)")
+	flagStr(processCmd, "pipeline.spool_dir", "spool-dir", "", "", "Zip spool dir (defaults to OS temp)")
+	flagStr(processCmd, "pipeline.use_local_dir", "local-dir", "", "", "Replay archives from this dir, no network")
+	// Retention.
+	flagBool(processCmd, "pipeline.keep_archive", "keep-archive", "", false, "Tee HTTP body to --archive-dir")
+	flagStr(processCmd, "pipeline.archive_dir", "archive-dir", "", "", "Where to keep raw archives")
+	flagBool(processCmd, "pipeline.keep_extracted", "keep-extracted", "", false, "Tee unwrapped entries to --extracted-dir")
+	flagStr(processCmd, "pipeline.extracted_dir", "extracted-dir", "", "", "Where to keep unwrapped entries")
+	// Resumability.
+	flagStr(processCmd, "pipeline.checkpoint_db", "checkpoint", "", "", "bbolt path enabling resumable runs (empty disables)")
+	flagBool(processCmd, "pipeline.reset_checkpoint", "reset", "", false, "Delete checkpoint DB and existing parquet output(s) before running")
+	// Server (live EPO source).
+	flagStr(processCmd, "server.base_url", "base-url", "", "", "EPO BDDS base URL")
+	flagDur(processCmd, "server.timeout", "timeout", "", 30*time.Second, "Per-request HTTP timeout")
+	flagInt(processCmd, "server.max_retries", "max-retries", "", 3, "Max HTTP retries per archive")
+	flagInt(processCmd, "server.product_id", "product-id", "", 3, "EPO product ID")
+	flagBool(processCmd, "server.verify_sha1", "verify-sha1", "", false, "Verify per-archive SHA-1")
 }
 
-// noopProgressBar is the silent fallback used when stdout is not a TTY.
-type noopProgressBar struct{}
+// newConfiguredExtractor builds the EPO XML extractor with the parse
+// concurrency taken from config.
+func newConfiguredExtractor() *pipeline.XMLStreamExtractor {
+	x := pipeline.NewXMLStreamExtractor()
+	x.ParseConcurrency = cfg.Pipeline.ParserConcurrency
+	return x
+}
 
-func (noopProgressBar) Describe(string)   {}
-func (noopProgressBar) Set64(int64) error { return nil }
-func (noopProgressBar) Finish() error     { return nil }
-
-// newProgressBar returns a TUI bar when stdout is a TTY, noopProgressBar
-// otherwise. Always non-nil.
-func newProgressBar(label string) progressBar {
-	if !isatty.IsTerminal(os.Stdout.Fd()) {
-		return noopProgressBar{}
-	}
-	return progressbar.NewOptions(-1,
-		progressbar.OptionSetDescription(label),
-		progressbar.OptionSetWriter(os.Stdout),
-		progressbar.OptionSpinnerType(14),
-		progressbar.OptionSetElapsedTime(true),
-		progressbar.OptionShowIts(),
-		progressbar.OptionSetItsString("rec"),
-		progressbar.OptionEnableColorCodes(true),
-		progressbar.OptionUseANSICodes(true),
-		progressbar.OptionThrottle(80*time.Millisecond),
-		progressbar.OptionClearOnFinish(),
+// resolveReaderConcurrency turns the configured (possibly auto) extractor
+// concurrency into a concrete reader count, auto-sized to NumCPU and clamped
+// by the configured memory budget.
+func resolveReaderConcurrency() int {
+	return pipeline.PlanReaderConcurrency(
+		cfg.Pipeline.ExtractorConcurrency,
+		runtime.NumCPU(),
+		int64(cfg.Pipeline.MemoryBudgetGB)<<30,
+		int64(cfg.Pipeline.PerEntryEstimateMB)<<20,
 	)
 }
 
@@ -63,7 +75,7 @@ func newProgressBar(label string) progressBar {
 var processCmd = &cobra.Command{
 	Use:   "process",
 	Short: "Stream EPO archives end-to-end into Parquet (download → extract → parse)",
-		RunE: func(_ *cobra.Command, _ []string) error {
+	RunE: func(_ *cobra.Command, _ []string) error {
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
 
@@ -104,7 +116,7 @@ var processCmd = &cobra.Command{
 		}
 		outPath := resolveOutputPath(cfg.Pipeline.OutputParquet, resume)
 		if resume && outPath != cfg.Pipeline.OutputParquet {
-			logger.Warnw("resume: writing to a new shard to preserve previous output",
+			logger.Warn("resume: writing to a new shard to preserve previous output",
 				"requested", cfg.Pipeline.OutputParquet, "actual", outPath)
 		}
 
@@ -117,53 +129,56 @@ var processCmd = &cobra.Command{
 		if _, ok := cp.(pipeline.NoopCheckpointer); !ok {
 			source = pipeline.NewCheckpointSource(source, cp, logger)
 			attachCheckpointJanitor(opener, cp)
-			logger.Infow("checkpoint: enabled", "db", cfg.Pipeline.CheckpointDB, "resume", resume)
+			logger.Info("checkpoint: enabled", "db", cfg.Pipeline.CheckpointDB, "resume", resume)
 		}
 
-		bar := newProgressBar("[cyan]streaming EPO[reset]")
-		var (
-			barMu      sync.Mutex
-			lastStats  pipeline.Stats
-			curArchive string
-			curDone    int64
-			curTotal   int64
-		)
-		describe := func() {
-			bar.Describe(fmt.Sprintf(
-				"[cyan]archives[reset] %d  [magenta]entries[reset] %d  [green]records[reset] %d  [yellow]batches[reset] %d  [white]%s %s[reset]",
-				lastStats.Archives, lastStats.Entries, lastStats.Records, lastStats.Batches,
-				curArchive, fmtBytes(curDone, curTotal),
-			))
+		// Live multi-bar display (TTY only). Route console logs through it so
+		// chatty INFO is suppressed and WARN+ prints cleanly above the bars.
+		disp := newDisplay(ctx)
+		tty := disp.active()
+		if tty {
+			logCtl.Console.SetTTYMode(disp.writer())
+			defer logCtl.Console.Restore() // safety net for early returns
 		}
+		disp.startAggregate("streaming EPO")
+		defer disp.stop()
+
+		readerConc := resolveReaderConcurrency()
+		logger.Info("reader concurrency resolved",
+			"requested", cfg.Pipeline.ExtractorConcurrency,
+			"num_cpu", runtime.NumCPU(),
+			"memory_budget_gb", cfg.Pipeline.MemoryBudgetGB,
+			"per_entry_estimate_mb", cfg.Pipeline.PerEntryEstimateMB,
+			"resolved", readerConc,
+		)
+
+		// lastStats is shared between the stats goroutine (writer) and this
+		// goroutine (final reader). The ref cell guards both accesses.
+		lastStats := newRef(pipeline.Stats{})
 		opts := []pipeline.Option{
 			pipeline.WithSource(source),
 			pipeline.WithOpener(opener),
-			pipeline.WithExtractor(pipeline.NewXMLStreamExtractor()),
+			pipeline.WithExtractor(newConfiguredExtractor()),
 			pipeline.WithSink(sink),
 			pipeline.WithLogger(logger),
 			pipeline.WithArchiveConcurrency(cfg.Pipeline.ArchiveConcurrency),
-			pipeline.WithExtractorConcurrency(cfg.Pipeline.ExtractorConcurrency),
+			pipeline.WithExtractorConcurrency(readerConc),
 			pipeline.WithBatchSize(cfg.Pipeline.BatchSize),
 			pipeline.WithBatchTimeout(cfg.Pipeline.BatchTimeout),
 		}
 		opts = append(opts, pipeline.WithProgress(func(s pipeline.Stats) {
-			barMu.Lock()
-			defer barMu.Unlock()
-			lastStats = s
-			describe()
-			_ = bar.Set64(s.Records)
+			lastStats.Set(s)()
+			disp.setAggregate(fmt.Sprintf(
+				"archives %d  entries %d  records %d  batches %d",
+				s.Archives, s.Entries, s.Records, s.Batches,
+			))
 		}))
 		if h, ok := opener.(*pipeline.HTTPOpener); ok {
-			var lastLogged time.Time
 			h.OnBytes = func(job pipeline.ArchiveJob, downloaded, total int64) {
-				barMu.Lock()
-				defer barMu.Unlock()
-				curArchive, curDone, curTotal = job.Name, downloaded, total
-				describe()
-				if now := time.Now(); now.Sub(lastLogged) >= 5*time.Second {
-					lastLogged = now
-					logger.Infow("download: progress", "label", job.Name, "bytes", fmtBytes(downloaded, total))
-				}
+				disp.onBytes(job, downloaded, total)
+			}
+			h.OnArchiveSettled = func(job pipeline.ArchiveJob, err error) {
+				disp.onSettled(job, err)
 			}
 		}
 
@@ -172,24 +187,47 @@ var processCmd = &cobra.Command{
 			return fmt.Errorf("build pipeline: %w", err)
 		}
 
-		logger.Infow("Starting streaming pipeline",
+		logger.Info("Starting streaming pipeline",
 			"output", outPath,
 			"archive_concurrency", cfg.Pipeline.ArchiveConcurrency,
-			"extractor_concurrency", cfg.Pipeline.ExtractorConcurrency,
+			"extractor_concurrency", readerConc,
 			"batch_size", cfg.Pipeline.BatchSize,
 		)
-		if err := p.Run(ctx); err != nil {
-			_ = bar.Finish()
-			return fmt.Errorf("pipeline: %w", err)
+		started := time.Now()
+		runErr := p.Run(ctx)
+		// Tear the bars down and hand the terminal back to plain logging
+		// before printing anything else, so neither the post-run logs nor the
+		// summary table are clobbered (and we stop writing through the now-shut
+		// mpb container).
+		disp.stop()
+		if tty {
+			logCtl.Console.Restore()
 		}
-		_ = bar.Finish()
+		if runErr != nil {
+			return fmt.Errorf("pipeline: %w", runErr)
+		}
+		elapsed := time.Since(started)
 		logger.Info("Streaming pipeline completed")
 
 		// Merge shards into the main output file so the workspace stays tidy
 		// and downstream tools (analyze) always read a single file.
 		if err := mergeParquetShards(cfg.Pipeline.OutputParquet, logger); err != nil {
-			logger.Warnw("merge shards: failed (non-fatal)", "err", err)
+			logger.Warn("merge shards: failed (non-fatal)", "err", err)
 		}
+
+		// Read the last published stats (zero value when no progress fired).
+		final := lastStats.Get()()
+		renderSummary("EPO process — summary", []kv{
+			{"Archives", strconv.FormatInt(final.Archives, 10)},
+			{"Entries", strconv.FormatInt(final.Entries, 10)},
+			{"Records", strconv.FormatInt(final.Records, 10)},
+			{"Batches", strconv.FormatInt(final.Batches, 10)},
+			{"Output", cfg.Pipeline.OutputParquet},
+			{"Elapsed", elapsed.Round(time.Millisecond).String()},
+			{"Records/s", fmt.Sprintf("%.1f", ratePerSec(final.Records, elapsed))},
+			{"Entries/s", fmt.Sprintf("%.1f", ratePerSec(final.Entries, elapsed))},
+		})
+		renderIssues(logCtl)
 		return nil
 	},
 }
@@ -312,13 +350,13 @@ func resolveOutputPath(configured string, resume bool) string {
 // silently ignored.
 func resetState(cpPath, outParquet string) error {
 	if cpPath = strings.TrimSpace(cpPath); cpPath != "" {
-		if err := os.Remove(cpPath); err != nil && !os.IsNotExist(err) {
+		if err := removeIfExists(cpPath); err != nil {
 			return fmt.Errorf("remove checkpoint %s: %w", cpPath, err)
 		}
-		logger.Infow("reset: checkpoint removed", "path", cpPath)
+		logger.Info("reset: checkpoint removed", "path", cpPath)
 	}
 	if outParquet = strings.TrimSpace(outParquet); outParquet != "" {
-		if err := os.Remove(outParquet); err != nil && !os.IsNotExist(err) {
+		if err := removeIfExists(outParquet); err != nil {
 			return fmt.Errorf("remove parquet %s: %w", outParquet, err)
 		}
 		dir := filepath.Dir(outParquet)
@@ -329,12 +367,24 @@ func resetState(cpPath, outParquet string) error {
 			ext = ".parquet"
 		}
 		shards, _ := filepath.Glob(filepath.Join(dir, fmt.Sprintf("%s.part-*%s", stem, ext)))
-		for _, s := range shards {
-			if err := os.Remove(s); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("remove shard %s: %w", s, err)
-			}
+		if _, err := F.Pipe1(
+			shards,
+			IOR.TraverseArray(func(s string) IOR.IOResult[any] {
+				return func() (any, error) { return nil, removeIfExists(s) }
+			}),
+		)(); err != nil {
+			return fmt.Errorf("remove shard: %w", err)
 		}
-		logger.Infow("reset: parquet output removed", "path", outParquet, "shards", len(shards))
+		logger.Info("reset: parquet output removed", "path", outParquet, "shards", len(shards))
+	}
+	return nil
+}
+
+// removeIfExists deletes path, treating a missing file as success. It is the
+// unit effect folded over by the reset traversals.
+func removeIfExists(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
 	}
 	return nil
 }
@@ -368,7 +418,7 @@ func humanBytes(n int64) string {
 // mergeParquetShards merges all <stem>.part-*<ext> shard files (plus the
 // main outPath if it exists) into a single outPath, then deletes the shards.
 // No-op when no shards are found.
-func mergeParquetShards(outPath string, log *zap.SugaredLogger) error {
+func mergeParquetShards(outPath string, log *slog.Logger) error {
 	dir := filepath.Dir(outPath)
 	base := filepath.Base(outPath)
 	ext := filepath.Ext(base)
@@ -387,21 +437,24 @@ func mergeParquetShards(outPath string, log *zap.SugaredLogger) error {
 		return err == nil
 	})(append([]string{outPath}, shards...))
 
-	log.Infow("merge: merging parquet shards",
+	log.Info("merge: merging parquet shards",
 		"main", outPath, "shards", len(shards), "total_files", len(sources))
 
 	tmpPath := outPath + ".merging"
 	err := withParquetWriter(tmpPath, func(w *parquet.GenericWriter[pipeline.PatentRecord]) error {
-		return F.Pipe1(sources,
-			array.Reduce(func(acc error, src string) error {
-				if acc != nil {
-					return acc
+		// TraverseArray sequences each shard read, short-circuiting on the
+		// first reader error.
+		_, e := F.Pipe1(
+			sources,
+			IOR.TraverseArray(func(src string) IOR.IOResult[any] {
+				return func() (any, error) {
+					return nil, withParquetReader(src, func(r *parquet.GenericReader[pipeline.PatentRecord]) error {
+						return copyParquetRecords(w, r)
+					})
 				}
-				return withParquetReader(src, func(r *parquet.GenericReader[pipeline.PatentRecord]) error {
-					return copyParquetRecords(w, r)
-				})
-			}, error(nil)),
-		)
+			}),
+		)()
+		return e
 	})
 	if err != nil {
 		_ = os.Remove(tmpPath)
@@ -414,10 +467,10 @@ func mergeParquetShards(outPath string, log *zap.SugaredLogger) error {
 	}
 	for _, s := range shards {
 		if err := os.Remove(s); err != nil && !os.IsNotExist(err) {
-			log.Warnw("merge: could not delete shard", "shard", s, "err", err)
+			log.Warn("merge: could not delete shard", "shard", s, "err", err)
 		}
 	}
-	log.Infow("merge: done", "output", outPath, "shards_deleted", len(shards))
+	log.Info("merge: done", "output", outPath, "shards_deleted", len(shards))
 	return nil
 }
 

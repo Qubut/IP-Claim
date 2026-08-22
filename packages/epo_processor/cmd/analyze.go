@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -37,19 +38,42 @@ import (
 // --collisions because it requires a second EPO pass and a per-family
 // counters map proportional to the EPO family graph.
 var analyzeCmd = &cobra.Command{
-	Use:   "analyze",
+	Use:   "analyze <hupd-dir> [epo-file]",
 	Short: "Build a linked EPO↔HUPD Parquet dataset and report citation overlap",
-	RunE: func(cmd *cobra.Command, _ []string) error {
+	Long: "Report overlap between an EPO record set and an extracted HUPD directory.\n\n" +
+		"Positional args (order-independent):\n" +
+		"  <hupd-dir>   root of extracted HUPD JSON files (recursive); the directory arg - required\n" +
+		"  [epo-file]   EPO records (.parquet/.csv/.csv.gz); the file arg; defaults to pipeline.output_parquet\n\n" +
+		"The directory arg is taken as the HUPD dir and the file arg as the EPO file,\n" +
+		"so the two may be given in either order. With one arg it is the HUPD dir.",
+	Args: cobra.RangeArgs(1, 2),
+	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
 
-		epoPath, _ := cmd.Flags().GetString("epo")
-		hupdDir, _ := cmd.Flags().GetString("hupd-dir")
-		metaPath, _ := cmd.Flags().GetString("hupd-meta")
-		outputJSON, _ := cmd.Flags().GetString("output")
+		// Positional args are order-independent: the HUPD source is a
+		// directory, the EPO record set is a file (.parquet/.csv/.csv.gz). We
+		// classify by filesystem type so `analyze <hupd-dir> <epo-file>` and
+		// `analyze <epo-file> <hupd-dir>` both work. With one arg it is the
+		// HUPD dir (EPO defaults to pipeline.output_parquet).
+		var epoPath, hupdDir string
+		switch {
+		case len(args) == 1:
+			hupdDir = args[0]
+		case isDir(args[0]) && !isDir(args[1]):
+			hupdDir, epoPath = args[0], args[1]
+		case isDir(args[1]) && !isDir(args[0]):
+			hupdDir, epoPath = args[1], args[0]
+		default:
+			// Ambiguous (both dirs, both files, or neither exists): fall back
+			// to the documented [epo-file] <hupd-dir> order.
+			epoPath, hupdDir = args[0], args[1]
+		}
+		metaPath, _ := cmd.Flags().GetString("meta")
+		outputJSON, _ := cmd.Flags().GetString("out")
 		datasetPath, _ := cmd.Flags().GetString("dataset")
 		minCollisions, _ := cmd.Flags().GetInt("min-collisions")
-		workers, _ := cmd.Flags().GetInt("hupd-workers")
+		workers, _ := cmd.Flags().GetInt("workers")
 		if workers <= 0 {
 			workers = runtime.NumCPU()
 		}
@@ -58,19 +82,27 @@ var analyzeCmd = &cobra.Command{
 			epoPath = cfg.Pipeline.OutputParquet
 		}
 		if strings.TrimSpace(epoPath) == "" {
-			return fmt.Errorf("--epo is required (or set pipeline.output_parquet)")
+			return fmt.Errorf("EPO file is required: pass it as the first positional arg or set pipeline.output_parquet")
 		}
 		if strings.TrimSpace(hupdDir) == "" {
-			return fmt.Errorf("--hupd-dir is required")
+			return fmt.Errorf("HUPD dir is required (last positional arg)")
 		}
 		if minCollisions < 1 {
 			minCollisions = 1
 		}
 
-		hupdStart := time.Now()
-		bar := newProgressBar("[cyan]analyze[reset]")
+		disp := newDisplay(ctx)
+		tty := disp.active()
+		if tty {
+			logCtl.Console.SetTTYMode(disp.writer())
+			defer logCtl.Console.Restore()
+		}
+		bar := disp.singleBar("analyze")
+		defer disp.stop()
 		var barMu sync.Mutex
-		logger.Infow("analyze: scanning HUPD", "dir", hupdDir, "meta", metaPath, "workers", workers)
+
+		hupdStart := time.Now()
+		logger.Info("analyze: scanning HUPD", "dir", hupdDir, "meta", metaPath, "workers", workers)
 		var (
 			hupdFiles map[string][]string
 			err       error
@@ -81,22 +113,20 @@ var analyzeCmd = &cobra.Command{
 			hupdFiles, err = hupd.ScanIDs(ctx, hupdDir, workers, bar, &barMu, logger)
 		}
 		if err != nil {
-			_ = bar.Finish()
 			return fmt.Errorf("scan HUPD: %w", err)
 		}
-		logger.Infow("analyze: HUPD scanned",
+		logger.Info("analyze: HUPD scanned",
 			"ids", len(hupdFiles),
 			"elapsed", time.Since(hupdStart).String(),
 		)
 
 		epoStart := time.Now()
-		logger.Infow("analyze: streaming EPO (single pass)", "path", epoPath, "dataset", datasetPath)
+		logger.Info("analyze: streaming EPO (single pass)", "path", epoPath, "dataset", datasetPath)
 		ov, datasetRows, err := streamEPOOnce(ctx, epoPath, hupdFiles, datasetPath, minCollisions, bar, &barMu)
 		if err != nil {
-			_ = bar.Finish()
 			return fmt.Errorf("stream EPO: %w", err)
 		}
-		logger.Infow("analyze: EPO pass done",
+		logger.Info("analyze: EPO pass done",
 			"records", ov.records,
 			"direct", ov.direct,
 			"family_only", ov.familyOnly,
@@ -114,23 +144,32 @@ var analyzeCmd = &cobra.Command{
 			if err := writeJSON(outputJSON, report); err != nil {
 				return err
 			}
-			logger.Infow("analyze: report written", "path", outputJSON)
+			logger.Info("analyze: report written", "path", outputJSON)
 		}
 
-		_ = bar.Finish()
+		disp.stop()
+		if tty {
+			logCtl.Console.Restore()
+		}
 		printReport(report)
+		renderIssues(logCtl)
 		return nil
 	},
 }
 
+// isDir reports whether path exists and is a directory.
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
 func init() {
-	analyzeCmd.Flags().String("epo", "", "EPO records file (.parquet, .csv, .csv.gz). Defaults to pipeline.output_parquet.")
-	analyzeCmd.Flags().String("hupd-dir", "", "Root directory of extracted HUPD JSON files (recursive).")
-	analyzeCmd.Flags().String("hupd-meta", "", "Path to a pre-downloaded HUPD Feather metadata file. If absent, falls back to full JSON dir scan.")
-	analyzeCmd.Flags().String("output", "", "Optional path to write the full report as JSON.")
-	analyzeCmd.Flags().String("dataset", "", "Path to write a Parquet dataset (one DatasetRecord per EPO patent with ≥ min-collisions cited-HUPD patents with category annotations).")
-	analyzeCmd.Flags().Int("min-collisions", 1, "Min cited-HUPD-with-categories count per EPO patent to emit a TrainingRecord (default 1).")
-	analyzeCmd.Flags().Int("hupd-workers", 0, "Concurrent HUPD JSON readers (0 = NumCPU).")
+	f := analyzeCmd.Flags()
+	f.StringP("meta", "m", "", "Pre-downloaded HUPD Feather metadata file. If absent, falls back to full JSON dir scan.")
+	f.StringP("out", "o", "", "Optional path to write the full report as JSON.")
+	f.String("dataset", "", "Path to write a Parquet dataset (one DatasetRecord per EPO patent with ≥ min-collisions cited-HUPD patents with category annotations).")
+	f.Int("min-collisions", 1, "Min cited-HUPD-with-categories count per EPO patent to emit a TrainingRecord (default 1).")
+	f.IntP("workers", "w", 0, "Concurrent HUPD JSON readers (0 = NumCPU).")
 }
 
 // epoStream opens path as a RecordSource and pushes each PatentRecord as a
@@ -222,10 +261,11 @@ func streamEPOOnce(
 
 	matched := make(map[string]matchKind, 1024)
 	var records, rows int64
-	var lastLogged time.Time
+	var lastLogged, lastBar time.Time
+	start := time.Now()
 
 	mu.Lock()
-	bar.Describe("[cyan]EPO↔HUPD[reset]")
+	bar.Describe("EPO↔HUPD")
 	mu.Unlock()
 
 	// doPass streams EPO records. w is nil for overlap-only (no dataset).
@@ -247,10 +287,13 @@ func streamEPOOnce(
 			}, matched)(A.Filter(inHUPD)(familyNorm))
 
 			// --- Dataset row ---
-			// Emit for any EPO patent that cites ≥ minCollisions HUPD patents
-			// with category annotations. EPOHUPDPaths is non-nil only when the
-			// EPO patent is itself in HUPD (direct match).
-			if w != nil {
+			// Emit only for EPO patents that are themselves in HUPD (a direct
+			// match) and cite ≥ minCollisions HUPD patents with category
+			// annotations. HUPD contains only US patents, so this restricts the
+			// citing side to the HUPD∩EPO intersection — i.e. US patents whose
+			// examiner report collides with other HUPD patents. EPOHUPDPaths is
+			// therefore always populated for emitted rows.
+			if w != nil && inHUPD(epoNorm) {
 				if cited := A.Filter(isHUPDCitation)(rec.Citations); len(cited) >= minCollisions {
 					_, err := w.Write([]DatasetRecord{{
 						EPOPatentID:  rec.PatentID,
@@ -265,12 +308,18 @@ func streamEPOOnce(
 				}
 			}
 
-			if now := time.Now(); now.Sub(lastLogged) >= hupd.ProgressEvery {
-				lastLogged = now
+			now := time.Now()
+			if now.Sub(lastBar) >= hupd.BarEvery {
+				lastBar = now
+				rate := float64(records) / now.Sub(start).Seconds()
 				mu.Lock()
-				_ = bar.Set64(records)
+				bar.Describe(fmt.Sprintf("EPO↔HUPD — records %s · matches %s · rows %s · %s",
+					hupd.FmtCount(records), hupd.FmtCount(int64(len(matched))), hupd.FmtCount(rows), hupd.FmtRate(rate)))
 				mu.Unlock()
-				logger.Infow("analyze: EPO progress",
+			}
+			if now.Sub(lastLogged) >= hupd.ProgressEvery {
+				lastLogged = now
+				logger.Info("analyze: EPO progress",
 					"records", records, "matches", len(matched), "dataset_rows", rows)
 			}
 			return nil
@@ -306,26 +355,19 @@ func streamEPOOnce(
 	return computeStats(), rows, err
 }
 
-// Uses fp-go pipeline: Map(trim+upper) → Filter(non-empty+unseen) → sort.
+// Uses fp-go pipeline: Map(trim+upper) → Filter(non-empty) → StrictUniq → sort.
 func uniqueUpper(values []string) []string {
 	if len(values) == 0 {
 		return nil
 	}
-	seen := make(map[string]struct{}, len(values))
-	isUnseen := func(v string) bool {
-		if _, ok := seen[v]; ok {
-			return false
-		}
-		seen[v] = struct{}{}
-		return true
-	}
-	filtered := F.Pipe2(
+	out := F.Pipe3(
 		values,
 		A.Map(func(v string) string { return strings.ToUpper(strings.TrimSpace(v)) }),
-		A.Filter(F.Pipe1(P.IsNonZero[string](), P.And(isUnseen))),
+		A.Filter(P.IsNonZero[string]()),
+		A.StrictUniq[string],
 	)
-	sort.Strings(filtered)
-	return filtered
+	sort.Strings(out)
+	return out
 }
 
 // --- report ----------------------------------------------------------------
@@ -349,20 +391,22 @@ func newReport(epoPath, hupdDir string, hupdTotal int, ov overlapStats) Report {
 }
 
 func printReport(r Report) {
-	fmt.Println("===== EPO ↔ HUPD analysis =====")
-	fmt.Printf("  EPO file           : %s\n", r.EPOFile)
-	fmt.Printf("  HUPD dir           : %s\n", r.HUPDDir)
-	fmt.Printf("  EPO records        : %d\n", r.EPORecords)
-	fmt.Printf("  HUPD total         : %d\n", r.HUPDTotal)
-	fmt.Println("--- overlap ---")
-	fmt.Printf("  direct match       : %d\n", r.OverlapDirect)
-	fmt.Printf("  family-only match  : %d\n", r.OverlapFamilyOnly)
-	fmt.Printf("  total in EPO       : %d  (%.2f%% of HUPD)\n", r.OverlapTotal, r.HUPDCoveragePct)
-	if r.DatasetRows > 0 {
-		fmt.Println("--- dataset ---")
-		fmt.Printf("  rows written       : %d\n", r.DatasetRows)
-		fmt.Printf("  output file        : %s\n", r.DatasetFile)
+	rows := []kv{
+		{"EPO file", r.EPOFile},
+		{"HUPD dir", r.HUPDDir},
+		{"EPO records", strconv.Itoa(r.EPORecords)},
+		{"HUPD total", strconv.Itoa(r.HUPDTotal)},
+		{"Overlap (direct)", strconv.Itoa(r.OverlapDirect)},
+		{"Overlap (family-only)", strconv.Itoa(r.OverlapFamilyOnly)},
+		{"Overlap (total)", fmt.Sprintf("%d  (%.2f%% of HUPD)", r.OverlapTotal, r.HUPDCoveragePct)},
 	}
+	if r.DatasetRows > 0 {
+		rows = append(rows,
+			kv{"Dataset rows", strconv.FormatInt(r.DatasetRows, 10)},
+			kv{"Dataset file", r.DatasetFile},
+		)
+	}
+	renderSummary("EPO ↔ HUPD analysis — summary", rows)
 }
 
 func writeJSON(path string, v any) error {

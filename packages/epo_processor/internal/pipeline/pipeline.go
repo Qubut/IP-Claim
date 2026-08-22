@@ -60,15 +60,16 @@ func (p *Pipeline) Run(ctx context.Context) (runErr error) {
 
 	jobs = rill.OrderedMap(jobs, 1, func(j ArchiveJob) (ArchiveJob, error) {
 		n := archivesSeen.Add(1)
-		log.Infow("archive: queued", "n", n, "label", j.Name, "url", j.URL)
+		log.Info("archive: queued", "n", n, "label", j.Name, "url", j.URL)
 		emit()
 		return j, nil
 	})
 
-	// OrderedFlatMap preserves per-archive locality for better Parquet compression.
-	entries := rill.OrderedFlatMap(jobs, p.opts.ArchiveConcurrency,
+	// Unordered FlatMap so every worker drains its own archive stream
+	// independently.
+	entries := rill.FlatMap(jobs, p.opts.ArchiveConcurrency,
 		func(j ArchiveJob) <-chan rill.Try[XMLEntry] {
-			log.Infow("archive: opening", "label", j.Name, "url", j.URL, "local_path", j.LocalPath)
+			log.Info("archive: opening", "label", j.Name, "url", j.URL, "local_path", j.LocalPath)
 			return p.opts.Opener.Stream(ctx, j)
 		})
 
@@ -79,10 +80,18 @@ func (p *Pipeline) Run(ctx context.Context) (runErr error) {
 	})
 
 	// Extractor owns each entry's lifetime and must call entry.Close().
-	records := rill.OrderedFlatMap(entries, p.opts.ExtractorConcurrency,
+	// Unordered FlatMap so ExtractorConcurrency parsers run in parallel.
+	records := rill.FlatMap(entries, p.opts.ExtractorConcurrency,
 		func(e XMLEntry) <-chan rill.Try[PatentRecord] {
 			return p.opts.Extractor.Stream(ctx, e)
 		})
+
+	// Safety net: downgrade any residual per-entry / parse stream error to
+	// a warning and drop it, so no single record aborts the whole run.
+	records = rill.Catch(records, 1, func(err error) error {
+		log.Warn("pipeline: skipping record-stream error (continuing)", "err", err)
+		return nil
+	})
 
 	batches := rill.Batch(records, p.opts.BatchSize, p.opts.BatchTimeout)
 
@@ -98,7 +107,7 @@ func (p *Pipeline) Run(ctx context.Context) (runErr error) {
 		recordsWritten.Add(int64(len(batch)))
 		emit()
 		if bn%10 == 1 {
-			log.Infow("sink: batch written",
+			log.Info("sink: batch written",
 				"batch", bn,
 				"size", len(batch),
 				"records_total", recordsWritten.Load(),
@@ -109,7 +118,7 @@ func (p *Pipeline) Run(ctx context.Context) (runErr error) {
 	})
 
 	emit()
-	log.Infow("pipeline: done",
+	log.Info("pipeline: done",
 		"archives", archivesSeen.Load(),
 		"entries", entriesSeen.Load(),
 		"records", recordsWritten.Load(),
