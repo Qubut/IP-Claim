@@ -29,7 +29,6 @@ tmp/
 
 # Project build
 main
-bin/
 *templ.go
 
 # OS X generated file
@@ -38,3 +37,4 @@ bin/
 openobserve-data
 # Added by goreleaser init:
 dist/
+bin/
