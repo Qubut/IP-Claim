@@ -1,9 +1,0 @@
-db:
-  uri: "mongodb://admin:${oc.env:MONGO_PASSWORD}@localhost:27017/?authSource=admin"
-  db_name: "ip_claim"
-  auth_source: "admin"
-  max_pool_size: 200
-  timeout_ms: 10000
-  index_options:
-    background: true  # Faster indexing in production
-    allow_dropping: true
