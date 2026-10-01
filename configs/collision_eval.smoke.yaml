@@ -1,0 +1,40 @@
+# Collision smoke: same 60/20/20 query split. query_limit prefers X-bearing
+# queries so eval can score true X without a full-corpus encode.
+
+dataset: /data/epo-data/epo_hupd_dataset.parquet
+hupd_dir: /data/hupd
+output_dir: /outputs/collision-smoke
+checkpoint: /outputs/ssv
+ssv_config: configs/ssv_train.prod.yaml
+recall_k: [5, 10]
+encode_batch_size: 2
+dataloader_num_workers: 50
+shard_flush_every: 50
+prefix_mode: trunk
+use_gpu: true
+num_devices: 4
+query_limit: 32
+disclosure_max_chunks: null
+
+covering:
+  sigma: 1.0
+  sigma_edge: 1.0
+  lambda_relation: 0.0
+  row_top_k: null
+  row_mass_keep: null
+  slot_top_k: null
+  slot_mass_keep: null
+contour_tau: 0.3
+explain_top_n: 5
+
+split:
+  train: 0.6
+  eval: 0.2
+  test: 0.2
+  seed: 42
+
+publish_to_hub: false
+hf_hub_repo_id: null
+hf_hub_private: true
+hf_hub_run_name: null
+hf_token: ${oc.env:HF_TOKEN,${oc.env:HUGGING_FACE_HUB_TOKEN,''}}

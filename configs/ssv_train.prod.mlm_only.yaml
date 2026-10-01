@@ -1,0 +1,90 @@
+host:
+  name: answerdotai/ModernBERT-large
+  d_model: 1024
+  lora_target_modules: [Wqkv, Wo, Wi]
+
+arch:
+  gnn_hidden: 256
+  gnn_heads: 4
+  gnn_layers: 2
+  n_soft_tokens: 8
+  entity_bank_size: 1024
+  relation_bank_size: 256
+  soft_dim: 256
+  max_length: 1024
+  memory_queue_size: 65536
+  lora_r: 64
+  lora_alpha: 128
+
+kendall:
+  kendall_log_sigma_init: 0.0
+  kendall_s_min: -8.0
+  kendall_s_max: 8.0
+  include_ke: false
+
+dest_comparison:
+  weight: 0.0
+  margin: 0.0
+  dest_shift: 1
+
+dual:
+  lambda_entropy: 1.0
+  normalize_assignment_entropy: true
+  entropy_pause_ratio: 0.95
+  entropy_pause_steps: 20
+
+mlm:
+  rho_max: 0.5
+  rho_warmup_steps: 4000
+
+bank:
+  bank_init_from_batch: true
+  bank_init_kmeans_iters: 10
+
+fit:
+  # Safety ceiling only. Fit stops when inventory tracks the TES-SAC floor.
+  max_steps: 100000
+  # Linear warmup, then constant peak LR. This ceiling is not the LR horizon.
+  lr_warmup_steps: 1000
+  # Consecutive in-band checks at the last locked inventory floor. A 0.9 ratchet
+  # sits outside the 0.01 TES-SAC band, so this must outlast one follow window.
+  early_stop_patience: 500
+  # Proven-safe microbatch on 46 GiB L40S. Local 16-row OOM at 1024 tokens.
+  batch_size: 8
+  accumulate_grad_batches: 8
+  num_devices: 1
+  dataloader_num_workers: 12
+  dataloader_prefetch_factor: 4
+  dataloader_pin_memory: true
+  prime_jate_spans: true
+  distributed_strategy: ddp
+  ddp_static_graph: false
+  # fsdp_grad_op if microbatch OOM; fsdp_full + fsdp_activation_checkpointing for full FT
+  checkpoint_dir: /outputs/ssv-fixd-mlm
+  checkpoint_every_n_steps: 1500
+  learning_rate: 3e-4
+  log_every_n_steps: 10
+  enable_progress_bar: true
+  enable_csv_logger: true
+
+log:
+  log_mlm_accuracy: true
+  log_learning_rate: true
+  log_trainable_params: true
+  log_grad_norm: true
+  grad_norm_type: 2.0
+
+runtime:
+  # Operator-owned Lightning ckpt for a model-prefix warm start. Null skips it.
+  # Haw container path: version_16 ssv-step009000 (host /mnt/workspaces/epo-data/ip-claim-ssv-runs/ssv).
+  init_weights: null
+  termhood_store_path: /outputs/ate-ray-full-hupd
+  hupd_dir: null
+  hupd_limit: null
+  publish_to_hub: false
+  hf_hub_repo_id: ssv/ssv
+  hf_hub_private: true
+  hf_hub_run_name: ssv
+  hf_token: ${oc.env:HF_TOKEN,${oc.env:HUGGING_FACE_HUB_TOKEN,''}}
+  ray: true
+  use_gpu: true

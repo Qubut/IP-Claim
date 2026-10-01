@@ -1,0 +1,3 @@
+# Ray Train ScalingConfig for Soft Structural Vocabulary (4-worker smoke default).
+num_workers: 4
+use_gpu: true

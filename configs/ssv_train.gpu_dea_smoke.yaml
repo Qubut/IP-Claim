@@ -1,0 +1,97 @@
+ate:
+  spacy_model: en_core_web_lg
+  cpu_job_width: 8
+  extract_block_rows: 256
+  pipe_docs: 8
+  sentence_group: 32
+  duckdb_memory: 128GB
+  duckdb_threads: 8
+  parent_buckets: 32
+  tail_window_cap: 400000
+  tail_weighted_bytes_cap: 400000000
+  base_window_cap: 25000000
+  base_weighted_bytes_cap: 2500000000
+  max_parent_units: 64
+  max_candidate_scans: 64
+  tail_candidate_row_cap: 50000
+  tail_compare_cap: 50000
+
+host:
+  name: answerdotai/ModernBERT-large
+  d_model: 1024
+  lora_target_modules: [Wqkv, Wo]
+
+arch:
+  gnn_hidden: 128
+  gnn_heads: 4
+  gnn_layers: 2
+  n_soft_tokens: 8
+  entity_bank_size: 256
+  relation_bank_size: 64
+  soft_dim: 128
+  max_length: 1024
+  memory_queue_size: 65536
+  lora_r: 32
+  lora_alpha: 64
+  inject_ramp_steps: 100
+  inject_ramp_end: 0.5
+  cpc_identity_dim: 16
+  soft_occupied_floor: 0.0
+
+kendall:
+  kendall_log_sigma_init: 0.0
+  kendall_s_min: -8.0
+  kendall_s_max: 8.0
+
+dual:
+  lambda_entropy: 1.0
+  normalize_assignment_entropy: true
+  entropy_pause_ratio: 0.95
+  entropy_pause_steps: 20
+
+mlm:
+  rho_max: 0.5
+  rho_warmup_steps: 4000
+
+bank:
+  bank_init_from_batch: true
+  bank_init_kmeans_iters: 10
+
+fit:
+  # Bounded diagnostic ceiling. Patience matches it so TES-SAC lock does not
+  # cut the post-stability gap read.
+  max_steps: 2000
+  lr_warmup_steps: 200
+  early_stop_patience: 2000
+  # Proven-safe microbatch on empty 46 GiB L40S after prior 16-row OOM.
+  batch_size: 8
+  accumulate_grad_batches: 8
+  num_devices: 4
+  dataloader_num_workers: 50
+  distributed_strategy: ddp
+  ddp_static_graph: false
+  checkpoint_dir: /outputs/ssv-occupied-graph-smoke
+  checkpoint_every_n_steps: 500
+  learning_rate: 3e-4
+  log_every_n_steps: 10
+  enable_progress_bar: true
+  enable_csv_logger: true
+
+log:
+  log_mlm_accuracy: true
+  log_learning_rate: true
+  log_trainable_params: true
+  log_grad_norm: true
+  grad_norm_type: 2.0
+
+runtime:
+  init_weights: null
+  hupd_dir: null
+  hupd_limit: 8192
+  publish_to_hub: false
+  hf_hub_repo_id: null
+  hf_hub_private: true
+  hf_hub_run_name: null
+  hf_token: ${oc.env:HF_TOKEN,${oc.env:HUGGING_FACE_HUB_TOKEN,''}}
+  ray: true
+  use_gpu: true

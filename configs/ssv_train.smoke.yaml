@@ -1,0 +1,42 @@
+host:
+  name: hf-internal-testing/tiny-random-bert
+  d_model: 32
+
+arch:
+  # Smoke-sized trunk (override for full runs).
+  gnn_hidden: 32
+  gnn_heads: 4
+  gnn_layers: 1
+  n_soft_tokens: 4
+  entity_bank_size: 16
+  soft_dim: 32
+  max_length: 64
+
+fit:
+  max_steps: 2
+  # Linear warmup then constant peak; 0 warmup so both smoke steps stay at peak.
+  lr_warmup_steps: 0
+  batch_size: 2
+  checkpoint_dir: artifacts/ssv
+  log_every_n_steps: 1
+  enable_progress_bar: true
+  enable_csv_logger: true
+
+log:
+  # Stage metrics (operators); defaults match SsvTrainConfig.
+  log_mlm_accuracy: true
+  log_learning_rate: true
+  log_trainable_params: true
+  log_grad_norm: true
+  grad_norm_type: 2.0
+
+runtime:
+  hupd_dir: null
+  hupd_limit: 64
+  publish_to_hub: false
+  hf_hub_repo_id: null
+  hf_hub_private: true
+  hf_hub_run_name: null
+  hf_token: ${oc.env:HF_TOKEN,${oc.env:HUGGING_FACE_HUB_TOKEN,''}}
+  ray: true
+  use_gpu: true
