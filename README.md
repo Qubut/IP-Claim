@@ -132,32 +132,80 @@ The loader walks recursively. Document id is `application_number`.
 
 ### B. Citation pairs (required for collision eval)
 
-Use [epo-processor](https://github.com/Qubut/epo-processor) to build a linked
-EPO–HUPD Parquet (`analyze --dataset`). The smoke collision config expects a
-path like:
+Collision ranking needs a linked EPO–HUPD citation Parquet produced by
+[epo-processor](https://github.com/Qubut/epo-processor) (`analyze --dataset`).
+Train/encode still read HUPD JSON; the Parquet supplies weak pairs for eval.
+
+Expected paths (override in YAML to match your disks):
 
 ```yaml
 dataset: /data/epo-data/epo_hupd_dataset.parquet
 hupd_dir: /data/hupd
 ```
 
-Locally or on a server you can run the published image:
+#### Option 1 — ansible playbook (recommended on a GPU server)
+
+This repo ships [`ops/ansible/playbooks/epo_data_prepare.yml`](ops/ansible/playbooks/epo_data_prepare.yml).
+It pulls `ghcr.io/qubut/epo-processor:latest`, creates the data tree, and runs
+idempotent Podman jobs for HUPD ingest, EPO BDDS process, and the analyze
+dataset link.
+
+| Tag | What it does |
+| --- | ------------ |
+| `prepare` | Create `epo_data_root` dirs and pull the epo-processor image |
+| `start_hupd` | Detached `process-hupd` (download / unpack HUPD into `…/hupd`) |
+| `start_process` | Detached `process` (EPO BDDS → `epo.parquet`) |
+| `start_analyze` | Detached `analyze --dataset` → `epo_hupd_dataset.parquet` (gated until HUPD exists) |
+| `status` | Print collection / container status without recreating jobs |
+
+Controller environment (inside `devenv shell`, usually from `.env`):
+
+| Variable | Role |
+| -------- | ---- |
+| `SERVER` | GPU server host (ansible `ansible_host`) |
+| `SERVER_USER` | SSH user |
+| `SERVER_SSH_KEY` | Optional private key path |
+| `SERVER_SSH_ARGS` | Optional extra SSH args (for example a jump `ProxyCommand`) |
+| `HF_TOKEN` | Optional; helps HUPD download rate limits |
+
+Defaults for data roots live in
+[`ops/ansible/inventory/group_vars/servers/common.yml`](ops/ansible/inventory/group_vars/servers/common.yml)
+(`epo_data_root`, `epo_hupd_dir`, `epo_dataset_path`, image name). Change those
+on your inventory fork or override vars — do not hard-code a site path into
+the shared playbook.
+
+From `ops/ansible`:
 
 ```bash
-# Example — adjust mounts to your disks
+# Create dirs + pull image, then show status
+devenv shell -- ansible-navigator run playbooks/epo_data_prepare.yml -- --tags prepare,status
+
+# Ingest HUPD and stream EPO (long-running detached containers)
+devenv shell -- ansible-navigator run playbooks/epo_data_prepare.yml -- --tags start_hupd,start_process
+
+# After both feeds have enough data, build the linked citation Parquet
+devenv shell -- ansible-navigator run playbooks/epo_data_prepare.yml -- --tags start_analyze
+
+# Re-check without restarting jobs
+devenv shell -- ansible-navigator run playbooks/epo_data_prepare.yml -- --tags status
+```
+
+Follow until `epo_hupd_dataset.parquet` exists and grows; starting a container
+is not acceptance. Use `status` (and host `podman logs` on the job names in
+`common.yml`) until the analyze artefact is present for collision eval.
+
+#### Option 2 — run the image yourself
+
+```bash
+# Example — adjust mounts to your disks; see epo-processor README for flags
 podman run --rm -v /data/epo-data:/data:rw \
   ghcr.io/qubut/epo-processor:latest \
-  analyze --dataset …
+  analyze /data/hupd /data/epo.parquet \
+  --dataset /data/epo_hupd_dataset.parquet
 ```
 
-This repo also ships ansible under [`ops/ansible/`](ops/ansible/) to prepare
-data on a GPU server (`playbooks/epo_data_prepare.yml` tags: `prepare`,
-`start_hupd`, `start_process`, `start_analyze`, `status`). From
-`ops/ansible` inside devenv:
-
-```bash
-devenv shell -- ansible-navigator run playbooks/epo_data_prepare.yml -- --tags prepare,status
-```
+Full CLI detail for `process-hupd`, `process`, and `analyze` lives in the
+[epo-processor](https://github.com/Qubut/epo-processor) repository.
 
 ### C. Termhood store (recommended for production train)
 
@@ -227,8 +275,9 @@ devenv shell -- python -m ip_claim.ssv probe-ingress --help
 
 ### Remote train via ansible (optional)
 
-With `SERVER` / `SERVER_USER` set in the environment and the repo mirrored on
-the GPU host:
+Data must already be on the server (see **Citation pairs** /
+[`epo_data_prepare.yml`](ops/ansible/playbooks/epo_data_prepare.yml) above).
+With `SERVER` / `SERVER_USER` set and the repo mirrored on the GPU host:
 
 ```bash
 cd ops/ansible
@@ -358,5 +407,5 @@ devenv shell -- pytest tests/unit/test_covering.py tests/unit/test_collision_ran
 
 ## License
 
-MIT (see package metadata in `pyproject.toml`). Respect HUPD and host-model
-licenses for any redistributed weights or derived corpora.
+[MIT](LICENSE). Respect HUPD and host-model licenses for any redistributed
+weights or derived corpora.
