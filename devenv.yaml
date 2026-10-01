@@ -1,3 +1,4 @@
+# yaml-language-server: $schema=https://devenv.sh/devenv.schema.json
 inputs:
   git-hooks:
     url: github:cachix/git-hooks.nix
@@ -8,6 +9,31 @@ inputs:
     url: github:cachix/devenv-nixpkgs/rolling
   nixpkgs-stable:
     url: github:NixOS/nixpkgs/nixos-25.05
+  pyproject-build-systems:
+    url: github:pyproject-nix/build-system-pkgs
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+      pyproject-nix:
+        follows: pyproject-nix
+      uv2nix:
+        follows: uv2nix
+  pyproject-nix:
+    url: github:pyproject-nix/pyproject.nix
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+  uv2nix:
+    url: github:pyproject-nix/uv2nix
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+      pyproject-nix:
+        follows: pyproject-nix
+imports:
+- ./nix
+- ./nix/python.nix
+- ./nix/ansible.nix
 secretspec:
   enable: true
   profile: default

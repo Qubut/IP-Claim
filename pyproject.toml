@@ -1,0 +1,333 @@
+[project]
+name = "ip-claim"
+version = "0.2.0"
+description = "Patent Foundation Trunk (SSV) and claim collision detection."
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+authors = [{ name = "Qubut" }]
+license = { text = "MIT" }
+
+dependencies = [
+  # Async I/O & functional control flow
+  "aiofiles>=24.1.0",
+  "aiostream>=0.7.1",
+  "asyncer>=0.0.8",
+  "asyncstdlib>=3.13.0",
+  "returns>=0.25.0",
+  "tenacity>=9.1.2",
+  # Configuration & DI
+  "dependency-injector>=4.49.0",
+  "omegaconf>=2.3.0",
+  "pydantic>=2.10.0",
+  "pydantic-settings>=2.6.0",
+  # Orchestration
+  "python-statemachine>=3.0.0",
+  "typer>=0.15.0",
+  # NER / chunking / LLM-programming
+  "langchain-text-splitters>=0.3.11",
+  # Knowledge graph
+  "neo4j>=5.27.0,<6",
+  "langchain-neo4j>=0.3.0",
+  "neomodel>=6.0.0",
+  # Agent memory (extraction-side; backed by Neo4j, no separate vector DB)
+  "mem0ai>=0.1.115",
+  # Data ingestion (HUPD JSON; pyarrow kept for future parquet sources)
+  "polars>=1.31.0",
+  "great-tables>=0.17.0",
+  "pyarrow>=18.0.0",
+  "numpy>=2.0.0",
+  # Observability
+  "structlog>=25.5.0",
+  # LLM client (sglang / ollama OpenAI-compat)
+  "httpx>=0.28.0",
+  "purgatory>=3.0.1",
+  "chromadb>=1.5.9",
+  "pykeen>=1.11.1",
+  "torchmetrics>=1.9.0",
+  "fast-pytorch-kmeans>=0.2.2",
+  "torch-geometric>=2.7.0",
+  "peft>=0.13",
+  "lightning>=2.5",
+  "ray[train]>=2.50",
+  "transformers[torch]>=4.52.0",
+  "spacy>=3.8.0",
+  "spacy-transformers>=1.3.0",
+  "cupy-cuda12x>=13.0",
+  "en-core-web-lg",
+  "en-core-web-trf",
+  "patent-ate>=1.0.0",
+]
+
+[dependency-groups]
+dev = [
+  "ipykernel>=7.0.0",
+  "jupyter>=1.1.1",
+  "mypy>=1.13.0",
+  "ruff>=0.11.0",
+  "pre-commit>=4.0.0",
+  "pydot>=4.0.1",
+]
+test = [
+  "pytest>=8.3.0",
+  "pytest-asyncio>=1.0.0",
+  "pytest-cov>=6.0.0",
+  "covdefaults>=2.3.0",
+  "hypothesis>=6.115.0",
+  "polyfactory>=2.18.0",
+  "respx>=0.21.0",
+  "testcontainers[neo4j]>=4.8.0",
+  "freezegun>=1.5.0",
+  # Real spaCy model for SpacyNormalizer integration tests
+  # (URL pinned in [tool.uv.sources] below).
+  "en-core-web-sm",
+]
+# ---------------------------------------------------------------------------
+# Optional GNN training stack (S7). Heavy (~1-2 GB installed); opt-in via
+#   uv sync --group gnn
+# Imports are gated to ``ip_claim.infrastructure.gnn.*`` by
+# ``tests/unit/test_import_audit.py``; the rest of the codebase keeps
+# working without these installed.
+# ---------------------------------------------------------------------------
+gnn = [
+  "torch>=2.4,<3",
+  "torch-geometric>=2.5",
+  "pykeen>=1.10",
+]
+# HuggingFace / sklearn stack for notebooks/ (opt-in via uv sync --group notebooks).
+notebooks = [
+  "datasets>=3.6.0",
+  "evaluate>=0.4.4",
+  "matplotlib>=3.8.0",
+  "scikit-learn>=1.6.0",
+  "scipy>=1.11.0",
+  "seaborn>=0.13.2",
+  "torch>=2.4,<3",
+  "transformers[torch]>=4.52.0",
+]
+docs = [
+  "sphinx>=8.0.0",
+  "myst-parser>=4.0.0",
+  "sphinx-book-theme>=1.1.0",
+  "sphinx-autodoc-typehints>=2.5.0",
+  "sphinx-copybutton>=0.5.2",
+  "sphinx-design>=0.6.1",
+]
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["ip_claim*"]
+
+[project.scripts]
+ip-claim-ssv = "ip_claim.ssv.__main__:main"
+ip-claim-collision = "ip_claim.collision.__main__:main"
+
+[tool.uv]
+default-groups = ["dev", "test"]
+
+[tool.uv.sources]
+en-core-web-lg = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl" }
+en-core-web-sm = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }
+en-core-web-trf = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_trf-3.8.0/en_core_web_trf-3.8.0-py3-none-any.whl" }
+# Pin torch to the CUDA 12.9 wheels, required by the server NVIDIA driver.
+torch = { index = "pytorch-cu129" }
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true
+# ---------------------------------------------------------------------------
+# Tooling
+# ---------------------------------------------------------------------------
+[tool.ruff]
+src = ["src", "experiments"]
+preview = true
+fix = true
+target-version = "py312"
+line-length = 100
+extend-exclude = ["tests/fixtures/**", "tests/**/__snapshots__/**", "notebooks/**"]
+
+[tool.ruff.format]
+quote-style = "single"
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = [
+  "A","B","C4","C90","COM","D","DTZ","E","ERA","EXE","F","FBT","FLY","FURB",
+  "G","I","ICN","ISC","LOG","N","PERF","PIE","PL","PT","PTH","Q","RET","RSE",
+  "RUF","S","SIM","SLF","SLOT","T100","TRY","UP","W","YTT",
+]
+ignore = [
+  "A005","COM812","D100","D101","D104","D106","D107","D203","D212","D401","D404","D405",
+  "FBT003","ISC001","ISC003","N812","PLR09","PLR2004","PLR6301","TRY003",
+]
+
+[tool.ruff.lint.flake8-quotes]
+inline-quotes = "single"
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.mccabe]
+max-complexity = 7
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101","S105","S106","S404","S603","S607","D","PT011","PLC2701","SLF001","RUF012"]
+# Adapter stubs deliberately omit method-level docstrings for `NotImplementedError`
+# bodies — full docstrings land alongside real implementations in Sessions 3-6.
+# Adapters live under each capability's adapters/ package (capability-first layout);
+# legacy infrastructure/ path kept for any not-yet-migrated modules.
+"src/ip_claim/*/adapters/**/*.py" = ["D102", "PLC2701"]
+"src/ip_claim/infrastructure/**/*.py" = ["D102"]
+# domain/__init__.py intentionally hosts the small exception hierarchy as the
+# public façade for the domain layer; application/__init__.py exposes Protocol
+# port definitions for hexagonal wiring — RUF067 (init must be re-exports only)
+# is too strict for our chosen contract style.
+# Package init installs the temporary import-compat finder (migration logic),
+# so it is not a pure re-export module.
+"src/ip_claim/__init__.py" = ["RUF067"]
+"src/ip_claim/domain/__init__.py" = ["RUF067"]
+"src/ip_claim/application/__init__.py" = ["RUF067"]
+# Composition root: wires package-private provider helpers from its own
+# per-capability sub-modules — PLC2701 (cross-module private import) is the
+# intended contract here, not a smell.
+"src/ip_claim/app/container/root.py" = ["PLC2701"]
+"experiments/**/*.py" = ["S101"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+# Per-function loop scope: each test owns its loop start-to-finish so
+# any sync test calling ``asyncio.run(...)`` doesn't race the session
+# loop and leak transports — the leak surfaced as a non-deterministic
+# ``PytestUnraisableExceptionWarning: ResourceWarning: unclosed event
+# loop`` attributed to whichever unrelated test ran next under the
+# global ``error`` warning filter.
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+# Make the top-level ``tests`` dir importable so shared test doubles in
+# ``tests/_fakes.py`` can be imported as ``from _fakes import ...`` from any
+# test module regardless of subdirectory.
+pythonpath = ["tests"]
+python_files = "test_*.py"
+xfail_strict = true
+filterwarnings = [
+  "error",
+  # MLflow >=3 emits a colorized UserWarning at import time of mlflow.dspy.wrapper
+  # when introspecting Pydantic models with Any-typed fields. The message starts
+  # with ANSI escape codes, so use module-scoped suppression instead of message.
+  "ignore::UserWarning:mlflow.types.type_hints",
+  "ignore::UserWarning:mlflow.utils.warnings_utils",
+  # DSPy 3.x emits a DeprecationWarning at import time from
+  # ``dspy.predict.avatar.signatures`` about the legacy ``prefix=`` argument
+  # of InputField/OutputField. We don't use that arg ourselves; suppress
+  # the upstream noise rather than pin to a specific dspy version.
+  "ignore:.*prefix.*argument in InputField/OutputField.*:DeprecationWarning",
+  # testcontainers >=4.x emits a DeprecationWarning at import time of
+  # ``testcontainers.core.waiting_utils`` because its own ``@wait_container_is_ready``
+  # decorator is being phased out in favour of structured wait strategies. The
+  # warning fires from the library's own module body (not our code), so we
+  # suppress it module-scoped rather than pin a specific testcontainers version.
+  "ignore::DeprecationWarning:testcontainers.core.waiting_utils",
+  # Same testcontainers warning, but matched by message text, pytest's
+  # module-scope filter doesn't always catch warnings emitted at module
+  # import time during collection, so we add a redundant message-based rule.
+  "ignore:.*wait_container_is_ready decorator is deprecated.*:DeprecationWarning",
+  # torch_geometric 2.7.x emits a DeprecationWarning at import time of
+  # ``torch_geometric.distributed`` (the submodule itself is being deprecated
+  # in favour of cuGraph examples). Triggered transitively by importing
+  # ``torch_geometric.data.HeteroData`` via the ``llm`` submodule chain.
+  "ignore::DeprecationWarning:torch_geometric.distributed",
+  "ignore:.*torch_geometric\\.distributed.*has been deprecated.*:DeprecationWarning",
+  # torch 2.11 emits a DeprecationWarning when ``torch.jit.script`` is invoked,
+  # which torch_geometric 2.7 still does at import time of pool/select modules.
+  "ignore:.*torch\\.jit\\.script.*is deprecated.*:DeprecationWarning",
+  "ignore::DeprecationWarning:torch.jit._script",
+  # torch_geometric 2.7 references ``torch.cuda.amp.custom_fwd``/``custom_bwd``
+  # which torch 2.11 has moved to ``torch.amp.custom_fwd(device_type=...)``.
+  "ignore:.*torch\\.cuda\\.amp\\.custom_(fwd|bwd).*is deprecated.*:FutureWarning",
+  # Lightning CombinedLoader still constructs torch pytree LeafSpec; torch 2.11
+  # deprecates ``isinstance(treespec, LeafSpec)``. Fires from Lightning, not us.
+  "ignore:.*isinstance\\(treespec, LeafSpec\\).*is deprecated.*:FutureWarning",
+  # JATE C-value warns on a one-document occupy batch; that batch is the corpus.
+  "ignore:.*corpus-level ranking algorithm.*:UserWarning",
+  # Lightning nanny warnings during collision encode predict (CPU tests, small loaders).
+  "ignore:.*does not have many workers.*:UserWarning",
+  "ignore:.*GPU available but not used.*:UserWarning",
+  # PyKEEN >=1.10 emits a DeprecationWarning from its SLCWA training loop that
+  # "Training instances are always shuffled." The shuffle was made mandatory;
+  # the warning fires from the library body, not our code.
+  "ignore:.*Training instances are always shuffled.*:DeprecationWarning",
+  # PyTorch DataLoader emits a UserWarning when pin_memory=True is requested
+  # but no CUDA device is present (CPU-only CI). PyKEEN passes pin_memory
+  # internally; suppressed here because it reflects environment not code.
+  "ignore:.*pin_memory.*argument is set as true but no accelerator.*:UserWarning",
+  # torch emits a UserWarning on first CUDA query when the host NVIDIA driver is
+  # older than the build's CUDA runtime (CPU-only / stale-driver dev boxes).
+  # Triggered transitively when spaCy/thinc initialises its torch backend.
+  # Environment artifact, not a code defect.
+  "ignore:.*CUDA initialization.*:UserWarning",
+  # Residual of the sync-test ``asyncio.run(...)`` loop-leak documented above:
+  # even with per-function loop scope, a discarded loop can be GC'd mid-run and
+  # surface as a ResourceWarning attributed to whichever unrelated test ran
+  # next. It is a test-harness artifact (no production code holds a loop), so we
+  # silence the unclosed-loop message specifically rather than weaken ``error``.
+  "ignore:.*unclosed event loop.*",
+  # Ray Data 2.58 DataContext.__init__ assigns the deprecated
+  # ``use_push_based_shuffle`` default before the replacement shuffle_strategy
+  # field. The warning fires from the library body on first context construct.
+  "ignore::DeprecationWarning:ray.data.context",
+  "ignore:.*use_push_based_shuffle.*:DeprecationWarning",
+  # Ibis 12 DuckDB schema inspect still calls duckdb.fetch_arrow_table.
+  "ignore:.*fetch_arrow_table.*is deprecated.*:DeprecationWarning",
+]
+addopts = ["--strict-config","--strict-markers","-ra","-m","not benchmark"]
+markers = [
+  "integration: tests that require docker (testcontainers)",
+  "slow: tests that take > 1s",
+  "optimization: nightly quality gates over the silver set + GEPA-compiled program",
+  "benchmark: machine-local timing gates kept out of the default suite",
+  "experiment: scientific experiment suite under experiments/",
+  "live: real SSV encode that needs COVERING_HUPD_DIR",
+]
+
+[tool.coverage.run]
+source = ["src/ip_claim"]
+branch = true
+plugins = ["covdefaults"]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+skip_covered = true
+
+[tool.pyright]
+include = ["src", "tests", "experiments"]
+extraPaths = ["src"]
+pythonVersion = "3.12"
+venvPath = ".devenv/state"
+venv = "venv"
+
+[tool.mypy]
+files = ["src", "experiments"]
+python_version = "3.12"
+strict = true
+plugins = ["returns.contrib.mypy.returns_plugin"]
+ignore_missing_imports = true
+local_partial_types = true
+warn_unreachable = true
+enable_error_code = [
+  "truthy-bool","truthy-iterable","redundant-expr","unused-awaitable",
+  "possibly-undefined","redundant-self","unimported-reveal","deprecated",
+]
+
+[[tool.mypy.overrides]]
+module = ["experiments.covering_objective.*"]
+disable_error_code = ["untyped-decorator"]
+
+[[tool.mypy.overrides]]
+module = ["aiofiles", "aiofiles.*", "aiostream", "aiostream.*"]
+ignore_missing_imports = true
+follow_imports = "skip"

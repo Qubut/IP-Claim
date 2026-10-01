@@ -1,4 +1,130 @@
+x-common-sglang: &common-sglang
+  image: docker.io/lmsysorg/sglang:latest
+  ipc: host
+  cap_add:
+    - IPC_LOCK
+  ulimits:
+    memlock: -1
+    stack: 67108864
+  restart: unless-stopped
+  security_opt:
+    - label=disable
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:30000/v1/models"]
+    interval: 15s
+    timeout: 10s
+    retries: 10
+    start_period: 300s
+  env_file:
+    - .env
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+  environment:
+    - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-0}
+    - HF_TOKEN=${HF_TOKEN}
+    - SGLANG_ENABLE_METRICS=true
+    - SGLANG_DYNAMIC_CHUNKING_SMOOTH_FACTOR=0.9
+    - HF_HUB_ENABLE_HF_TRANSFER=1
+    - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  # devices:
+  #   - "nvidia.com/gpu=all"
+
 services:
+
+  sglang-llama:
+    <<: *common-sglang
+    container_name: sglang-llama
+    profiles: ["llama"]
+    shm_size: '4gb'
+    devices:
+      - nvidia.com/gpu=0
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+    ports:
+      - "30001:30000"
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+      - ./logs/llama:/app/logs
+    command: >
+      python3 -m sglang.launch_server
+        --model-path meta-llama/Llama-3.1-8B-Instruct
+        --host 0.0.0.0
+        --port 30000
+        --tensor-parallel-size 1
+        --mem-fraction-static 0.82
+        --kv-cache-dtype fp8_e4m3
+        --attention-backend flashinfer
+        --prefill-attention-backend flashinfer
+        --decode-attention-backend flashinfer
+        --disable-hybrid-swa-memory
+        --trust-remote-code
+        --log-level info
+        --max-running-requests 64
+        --max-queued-requests 512
+        --context-length 16384
+        --chunked-prefill-size 8192
+        --max-prefill-tokens 16384
+        --max-total-tokens 65536
+        --prefill-max-requests 32
+        --enable-dynamic-chunking
+        --enable-mixed-chunk
+        --enable-single-batch-overlap
+        --schedule-policy lpm
+        --schedule-conservativeness 0.7
+        --cuda-graph-max-bs 64
+        --warmups 5
+        --enable-metrics
+        --enable-metrics-for-all-schedulers
+        --radix-eviction-policy lru
+
+  sglang-deepseek:
+    <<: *common-sglang
+    container_name: sglang-deepseek
+    profiles: ["deepseek"]
+    shm_size: '4gb'
+    devices:
+      - nvidia.com/gpu=1
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=1
+    ports:
+      - "30002:30000"
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+      - ./logs/deepseek:/app/logs
+    command: >
+      python3 -m sglang.launch_server
+      --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+      --host 0.0.0.0
+      --port 30000
+      --tensor-parallel-size 1
+      --mem-fraction-static 0.82
+      --kv-cache-dtype fp8_e4m3
+      --attention-backend flashinfer
+      --prefill-attention-backend flashinfer
+      --decode-attention-backend flashinfer
+      --disable-hybrid-swa-memory
+      --trust-remote-code
+      --log-level info
+      --max-running-requests 64
+      --max-queued-requests 512
+      --context-length 16384
+      --chunked-prefill-size 8192
+      --max-prefill-tokens 16384
+      --max-total-tokens 65536
+      --prefill-max-requests 32
+      --enable-dynamic-chunking
+      --enable-mixed-chunk
+      --enable-single-batch-overlap
+      --schedule-policy lpm
+      --schedule-conservativeness 0.7
+      --cuda-graph-max-bs 64
+      --warmups 5
+      --enable-metrics
+      --enable-metrics-for-all-schedulers
+      --radix-eviction-policy lru
   mongodb:
     image: mongo:latest
     container_name: mongodb

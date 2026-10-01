@@ -1,0 +1,5 @@
+.env
+.devenv
+.git
+.venv
+.cursor
