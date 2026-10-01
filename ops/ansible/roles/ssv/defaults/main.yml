@@ -1,0 +1,26 @@
+---
+ssv_controller_root: "{{ playbook_dir | dirname | dirname | dirname }}"
+ssv_job_kind: covering
+ssv_job_name: "job-{{ ssv_job_kind }}"
+ssv_job_kinds:
+  - covering
+  - train
+  - ablate
+  - probe
+  - collision
+ssv_job_devices: []
+ssv_job_volumes:
+  - "{{ ssv_hupd_host_root }}:/data/hupd:ro"
+  - "{{ ssv_output_host_root }}:/outputs"
+ssv_job_command: []
+ssv_job_env:
+  PYTHONPATH: /app/src
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+ssv_occupancy_limit: ""
+ssv_covering_train_yaml: /app/configs/ssv_train.prod.yaml
+ssv_covering_ledger_root: /outputs/covering-objective/ledgers
+ssv_sync_trees:
+  - src
+  - configs
+  - experiments
+  - containers

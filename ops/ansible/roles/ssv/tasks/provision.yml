@@ -1,0 +1,86 @@
+---
+- name: Require Hugging Face token on controller
+  ansible.builtin.assert:
+    that:
+      - hf_token | length > 0
+    fail_msg: HF_TOKEN or HUGGING_FACE_HUB_TOKEN must be set in the controller environment.
+
+- name: Isolated engine directories
+  module_defaults:
+    ansible.builtin.file:
+      owner: "{{ ansible_user }}"
+      group: "{{ ansible_user }}"
+  block:
+    - name: Ensure isolated Podman directories
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: directory
+        mode: "{{ item.mode }}"
+      loop:
+        - path: "{{ ssv_opaque_server_root }}"
+          mode: "0700"
+        - path: "{{ ssv_podman_root }}"
+          mode: "0750"
+        - path: "{{ ssv_podman_runroot }}"
+          mode: "0750"
+        - path: "{{ ssv_podman_tmpdir }}"
+          mode: "0750"
+        - path: "{{ server_user_home }}/.config/systemd/user"
+          mode: "0755"
+      loop_control:
+        label: "{{ item.path }}"
+
+- name: Enable podman.socket user unit
+  ansible.builtin.systemd:
+    name: podman.socket
+    scope: user
+    enabled: true
+    state: started
+  register: ssv_podman_socket_unit
+  failed_when: false
+
+- name: Note when podman.socket enable failed
+  ansible.builtin.debug:
+    msg: >-
+      podman.socket enable failed — isolated engine unit still starts per-invocation
+  when: ssv_podman_socket_unit is failed
+
+- name: Enable linger for SSH user
+  ansible.builtin.command:
+    argv: [loginctl, enable-linger, "{{ ansible_user }}"]
+  register: ssv_linger
+  changed_when: ssv_linger.rc == 0
+  failed_when: false
+
+- name: Note when linger enable failed
+  ansible.builtin.debug:
+    msg: linger denied — user services will not survive logout
+  when: ssv_linger.rc != 0
+
+- name: Install isolated Podman engine systemd unit
+  ansible.builtin.template:
+    src: ssv_podman_engine.service.j2
+    dest: "{{ server_user_home }}/.config/systemd/user/{{ ssv_podman_unit }}"
+    mode: "0644"
+
+- name: Enable and start isolated Podman engine
+  ansible.builtin.systemd:
+    name: "{{ ssv_podman_unit }}"
+    scope: user
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Wait for isolated Podman socket
+  ansible.builtin.wait_for:
+    path: "{{ ssv_podman_socket }}"
+    state: present
+    timeout: 30
+
+- name: Ensure HF token secret on isolated engine
+  containers.podman.podman_secret:
+    name: "{{ ssv_hf_token_secret }}"
+    data: "{{ hf_token }}"
+    state: present
+    force: true
+  no_log: true

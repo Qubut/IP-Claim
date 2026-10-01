@@ -1,0 +1,20 @@
+---
+- name: Ensure epo-data directory tree
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0750"
+  loop:
+    - "{{ epo_data_root }}"
+    - "{{ epo_hupd_dir }}"
+    - "{{ epo_logs_dir }}"
+    - "{{ epo_archives_dir }}"
+    - "{{ epo_spool_dir }}"
+
+- name: Pull epo-processor image
+  containers.podman.podman_image:
+    name: "{{ epo_image }}"
+    pull: true
+    force: true
+  async: 3600
+  poll: 15

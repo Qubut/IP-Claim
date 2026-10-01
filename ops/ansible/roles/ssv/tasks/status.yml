@@ -1,0 +1,18 @@
+---
+- name: Isolated engine status
+  environment:
+    CONTAINER_HOST: "{{ ssv_container_host }}"
+  block:
+    - name: Stat isolated Podman socket
+      ansible.builtin.stat:
+        path: "{{ ssv_podman_socket }}"
+      register: ssv_socket_stat
+
+    - name: Require isolated Podman socket
+      ansible.builtin.assert:
+        that:
+          - ssv_socket_stat.stat.exists | default(false)
+        fail_msg: Isolated Podman socket missing at {{ ssv_podman_socket }}
+
+    - name: Follow running jobs
+      ansible.builtin.import_tasks: follow.yml

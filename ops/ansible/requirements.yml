@@ -1,0 +1,7 @@
+---
+# Collections install via devenv shell (nix/ansible.nix task ip-claim:ansible-galaxy).
+collections:
+  - name: containers.podman
+    version: ">=1.16.0"
+  - name: ansible.posix
+    version: ">=2.2.0"

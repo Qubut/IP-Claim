@@ -1,0 +1,19 @@
+---
+epo_job_name: "{{ epo_container_hupd }}"
+epo_job_warn_empty_hf: true
+epo_job_no_log: "{{ (hf_token | length) > 0 }}"
+epo_job_env: "{{ {'SSL_CERT_FILE': epo_ssl_cert_file} | combine({'HF_TOKEN': hf_token} if (hf_token | length) > 0 else {}) }}"
+epo_job_command:
+  - process-hupd
+  - "{{ epo_container_data }}/hupd"
+  - --url
+  - "{{ epo_hupd_url }}"
+  - --filename
+  - "{{ epo_hupd_filename }}"
+  - --keep-archive
+  - --archive-dir
+  - "{{ epo_container_data }}/archives"
+  - --spool-dir
+  - "{{ epo_container_data }}/spool"
+  - --log-dir
+  - "{{ epo_container_log_dir }}"

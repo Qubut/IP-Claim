@@ -1,0 +1,89 @@
+---
+# SSV jobs on the isolated Podman engine.
+#
+# One play, one role. Tags select tasks_from / vars_from.
+#
+#   ansible-navigator run playbooks/ssv_train.yml -- --tags covering
+#   ansible-navigator run playbooks/ssv_train.yml -- --tags status
+#   ansible-navigator run playbooks/ssv_train.yml -- --list-tags
+#
+# covering starts (recreate) then prints follow. status reprints follow
+# without recreate: compact jobs, logs, accelerator query, ledgers.
+
+- name: SSV jobs on the isolated Podman engine
+  hosts: servers
+  gather_facts: false
+  environment:
+    CONTAINER_HOST: "{{ ssv_container_host }}"
+  tasks:
+    - name: Require server identity
+      ansible.builtin.assert:
+        that:
+          - ansible_host | length > 0
+          - ansible_user | length > 0
+        fail_msg: TEXTLESS_SERVER and TEXTLESS_SERVER_USER must be set in the controller environment
+      tags: [always]
+
+    - name: Provision isolated Podman engine
+      ansible.builtin.include_role:
+        name: ssv
+        tasks_from: provision
+        apply:
+          tags: [provision]
+      tags: [provision]
+
+    - name: Assert GPU base image
+      ansible.builtin.include_role:
+        name: ssv
+        tasks_from: assert_gpu_base
+        apply:
+          tags: [image]
+      tags: [image]
+
+    - name: Covering collection
+      ansible.builtin.include_role:
+        name: ssv
+        vars_from: covering
+        apply:
+          tags: [covering]
+      tags: [covering]
+
+    - name: SSV train
+      ansible.builtin.include_role:
+        name: ssv
+        vars_from: train
+        apply:
+          tags: [train]
+      tags: [train]
+
+    - name: Graph-prefix ablation
+      ansible.builtin.include_role:
+        name: ssv
+        vars_from: ablate
+        apply:
+          tags: [ablate]
+      tags: [ablate]
+
+    - name: Ingress probe
+      ansible.builtin.include_role:
+        name: ssv
+        vars_from: probe
+        apply:
+          tags: [probe]
+      tags: [probe]
+
+    - name: Collision eval
+      ansible.builtin.include_role:
+        name: ssv
+        vars_from: collision
+        apply:
+          tags: [collision]
+      tags: [collision]
+
+    - name: SSV status
+      ansible.builtin.include_role:
+        name: ssv
+        tasks_from: status
+        apply:
+          tags: [status]
+      tags: [status]

@@ -1,0 +1,243 @@
+---
+# Compact job follow. containers.podman 1.20.2 has no logs module.
+# HostConfig.LogConfig is journald with an empty Path, so slurp cannot
+# read stdout. argv podman logs and nvidia-smi are the collection gap.
+# Ledgers are host files: find plus slurp. Do not dump inspect.Env.
+- name: Reset follow projections
+  ansible.builtin.set_fact:
+    ssv_follow_jobs: []
+    ssv_follow_logs: []
+    ssv_follow_ledgers: []
+    ssv_follow_procs: []
+    ssv_follow_stacks: []
+
+- name: Gather job container facts
+  containers.podman.podman_container_info:
+    name: "{{ ssv_job_kinds | map('regex_replace', '(.+)', 'job-\\1') | list }}"
+  register: ssv_container_info
+  changed_when: false
+  failed_when: false
+
+- name: Project job facts
+  ansible.builtin.set_fact:
+    ssv_follow_jobs: "{{ ssv_follow_jobs + [ssv_follow_job] }}"
+  loop: "{{ ssv_container_info.containers | default([]) }}"
+  loop_control:
+    label: "{{ item.Name | default('') }}"
+  vars:
+    ssv_follow_state: "{{ item.State | default({}) }}"
+    ssv_follow_job:
+      name: "{{ item.Name | default('') }}"
+      image: "{{ item.ImageName | default('') }}"
+      command: "{{ item.Args | default(item.Config.Cmd | default([])) }}"
+      status: "{{ ssv_follow_state.Status | default('') }}"
+      exit_code: "{{ ssv_follow_state.ExitCode | default('') }}"
+      oom: "{{ ssv_follow_state.OOMKilled | default(false) }}"
+      error: "{{ ssv_follow_state.Error | default('') }}"
+      started: "{{ ssv_follow_state.StartedAt | default('') }}"
+
+- name: Query accelerator memory
+  ansible.builtin.command:
+    argv:
+      - nvidia-smi
+      - --query-gpu=index,memory.used,memory.total,utilization.gpu
+      - --format=csv,noheader
+  register: ssv_accelerator_query
+  changed_when: false
+  failed_when: false
+
+- name: Query accelerator compute apps
+  ansible.builtin.command:
+    argv:
+      - nvidia-smi
+      - --query-compute-apps=gpu_bus_id,pid,used_gpu_memory,process_name
+      - --format=csv,noheader
+  register: ssv_accelerator_apps
+  changed_when: false
+  failed_when: false
+
+- name: Query accelerator compute pids
+  ansible.builtin.command:
+    argv:
+      - nvidia-smi
+      - --query-compute-apps=pid
+      - --format=csv,noheader
+  register: ssv_accelerator_pids
+  changed_when: false
+  failed_when: false
+
+- name: Dump accelerator process stacks
+  ansible.builtin.command:
+    argv:
+      - "{{ ssv_output_host_root }}/covering-objective/bin/py-spy"
+      - dump
+      - --pid
+      - "{{ item | trim }}"
+      - --nonblocking
+  loop: "{{ ssv_accelerator_pids.stdout_lines | default([]) }}"
+  loop_control:
+    label: "{{ item | trim }}"
+  register: ssv_worker_stacks
+  changed_when: false
+  failed_when: false
+  when: (item | trim | length) > 0
+
+- name: Sample host process for each job
+  ansible.builtin.command:
+    argv:
+      - ps
+      - -o
+      - pid,etime,pcpu,pmem,rss,stat,wchan:24,cmd
+      - -p
+      - "{{ item.State.Pid | default(0) }}"
+  loop: "{{ ssv_container_info.containers | default([]) }}"
+  loop_control:
+    label: "{{ item.Name | default('') }}"
+  register: ssv_job_ps
+  changed_when: false
+  failed_when: false
+  when:
+    - (item.Name | default('')) | length > 0
+    - (item.State.Pid | default(0) | int) > 0
+
+- name: Project host processes
+  ansible.builtin.set_fact:
+    ssv_follow_procs: "{{ ssv_follow_procs + [ssv_follow_proc] }}"
+  loop: "{{ ssv_job_ps.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.Name | default('') }}"
+  when: item.stdout is defined
+  vars:
+    ssv_follow_proc:
+      name: "{{ item.item.Name | default('') }}"
+      pid: "{{ item.item.State.Pid | default('') }}"
+      lines: "{{ item.stdout_lines | default([]) }}"
+
+- name: Dump python stacks
+  ansible.builtin.command:
+    argv:
+      - "{{ ssv_output_host_root }}/covering-objective/bin/py-spy"
+      - dump
+      - --pid
+      - "{{ item.State.Pid | default(0) }}"
+      - --nonblocking
+  loop: "{{ ssv_container_info.containers | default([]) }}"
+  loop_control:
+    label: "{{ item.Name | default('') }}"
+  register: ssv_job_stacks
+  changed_when: false
+  failed_when: false
+  when:
+    - (item.Name | default('')) | length > 0
+    - (item.State.Pid | default(0) | int) > 0
+    - (item.State.Status | default('')) == 'running'
+
+- name: Project python stacks
+  ansible.builtin.set_fact:
+    ssv_follow_stacks: "{{ ssv_follow_stacks + [ssv_follow_stack] }}"
+  loop: "{{ ssv_job_stacks.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.Name | default('') }}"
+  when: item.stdout is defined or item.stderr is defined
+  vars:
+    ssv_follow_stack:
+      name: "{{ item.item.Name | default('') }}"
+      pid: "{{ item.item.State.Pid | default('') }}"
+      lines: "{{ (item.stdout_lines | default([])) + (item.stderr_lines | default([])) }}"
+
+- name: Read job logs
+  ansible.builtin.command:
+    argv:
+      - podman
+      - logs
+      - --tail
+      - "120"
+      - "{{ item.Name }}"
+  loop: "{{ ssv_container_info.containers | default([]) }}"
+  loop_control:
+    label: "{{ item.Name | default('') }}"
+  register: ssv_job_logs
+  changed_when: false
+  failed_when: false
+  when: (item.Name | default('')) | length > 0
+
+- name: Project job logs
+  ansible.builtin.set_fact:
+    ssv_follow_logs: "{{ ssv_follow_logs + [ssv_follow_log] }}"
+  loop: "{{ ssv_job_logs.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.Name | default('') }}"
+  when: item.stdout is defined
+  vars:
+    ssv_follow_log:
+      name: "{{ item.item.Name | default('') }}"
+      lines: "{{ item.stdout_lines | default([]) }}"
+
+- name: Stat covering ledger root
+  ansible.builtin.stat:
+    path: "{{ ssv_output_host_root }}/covering-objective/ledgers"
+  register: ssv_ledger_root
+
+- name: Find covering measurement files
+  ansible.builtin.find:
+    paths: "{{ ssv_output_host_root }}/covering-objective/ledgers"
+    patterns:
+      - measurements.json
+      - matching_heatmap.json
+    recurse: true
+  register: ssv_covering_ledgers
+  when: ssv_ledger_root.stat.isdir | default(false)
+
+- name: Read covering measurements
+  ansible.builtin.slurp:
+    src: "{{ item.path }}"
+  loop: "{{ ssv_covering_ledgers.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: ssv_covering_measurements
+
+- name: Project covering measurements
+  ansible.builtin.set_fact:
+    ssv_follow_ledgers: "{{ ssv_follow_ledgers + [ssv_follow_ledger] }}"
+  loop: "{{ ssv_covering_measurements.results | default([]) }}"
+  loop_control:
+    label: "{{ item.source | default('') }}"
+  when: item.content is defined
+  vars:
+    ssv_follow_ledger: >-
+      {{
+        (item.content | b64decode | from_json)
+        | dict2items
+        | rejectattr('key', 'in', ['demand_l1', 'available', 'slots'])
+        | items2dict
+        | combine({
+            'path': item.source,
+            'mtime': '%Y-%m-%dT%H:%M:%S' | strftime(item.item.mtime | default(0) | int),
+          })
+      }}
+
+- name: Project accelerator process stacks
+  ansible.builtin.set_fact:
+    ssv_follow_stacks: "{{ ssv_follow_stacks + [ssv_follow_worker] }}"
+  loop: "{{ (ssv_worker_stacks | default({})).results | default([]) }}"
+  loop_control:
+    label: "{{ item.item | default('') | trim }}"
+  when: item.stdout is defined or item.stderr is defined
+  vars:
+    ssv_follow_worker:
+      name: "gpu-pid-{{ item.item | default('') | trim }}"
+      pid: "{{ item.item | default('') | trim }}"
+      lines: "{{ (item.stdout_lines | default([])) + (item.stderr_lines | default([])) }}"
+
+- name: Show job follow
+  ansible.builtin.debug:
+    var: ssv_follow
+  vars:
+    ssv_follow:
+      jobs: "{{ ssv_follow_jobs }}"
+      accelerators: "{{ ssv_accelerator_query.stdout_lines | default([]) }}"
+      compute_apps: "{{ ssv_accelerator_apps.stdout_lines | default([]) }}"
+      procs: "{{ ssv_follow_procs }}"
+      stacks: "{{ ssv_follow_stacks }}"
+      logs: "{{ ssv_follow_logs }}"
+      ledgers: "{{ ssv_follow_ledgers }}"

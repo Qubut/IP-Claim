@@ -1,0 +1,6 @@
+---
+- name: Assert GPU base image is loaded
+  containers.podman.podman_image_info:
+    name: "{{ ssv_gpu_base_image }}"
+  register: ssv_job_base
+  failed_when: ssv_job_base.images | default([]) | length == 0

@@ -1,0 +1,10 @@
+ssv_job_command:
+  - /bin/bash
+  - -lc
+  - >-
+      python -m pytest
+      experiments/covering_objective/test_letter_graph_contribution.py::TestLetterGraphContributionLive
+      --override-ini addopts=
+      -o cache_dir=/outputs/covering-objective/.pytest_cache
+      --tb=short -q -s
+      && python -c "from experiments.covering_objective.frozen_judgment import judge_from_env; print(judge_from_env().model_dump_json())"

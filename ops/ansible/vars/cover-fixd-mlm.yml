@@ -1,0 +1,5 @@
+ssv_job_name: job-covering-fixd-mlm
+ssv_covering_train_yaml: /outputs/covering-objective/judge-2x2/mlm.yaml
+ssv_covering_ledger_root: /outputs/covering-objective/ledgers/fixd-mlm
+ssv_job_devices:
+  - nvidia.com/gpu=0

@@ -1,0 +1,160 @@
+---
+- name: Isolated engine
+  environment:
+    CONTAINER_HOST: "{{ ssv_container_host }}"
+  module_defaults:
+    ansible.builtin.file:
+      owner: "{{ ansible_user }}"
+      group: "{{ ansible_user }}"
+    containers.podman.podman_container:
+      state: started
+      recreate: true
+      detach: true
+      workdir: /app
+      network: host
+      pids_limit: -1
+      shm_size: "{{ ssv_train_shm_size }}"
+      secrets:
+        - "{{ ssv_hf_token_secret }},type=env,target=HF_TOKEN"
+      label:
+        ssv.kind: "{{ ssv_job_kind }}"
+  block:
+    - name: Bind runtime env from this kind
+      ansible.builtin.set_fact:
+        ssv_runtime_env: "{{ ssv_job_env }}"
+
+    - name: Stat HUPD root
+      ansible.builtin.stat:
+        path: "{{ ssv_hupd_host_root }}"
+      register: ssv_hupd_stat
+
+    - name: Require HUPD root
+      ansible.builtin.assert:
+        that:
+          - ssv_hupd_stat.stat.isdir | default(false)
+        fail_msg: "HUPD directory missing at {{ ssv_hupd_host_root }}"
+
+    - name: Ensure output root
+      ansible.builtin.file:
+        path: "{{ ssv_output_host_root }}"
+        state: directory
+        mode: "0750"
+
+    - name: Mirror overlay context onto the server tree
+      ansible.builtin.include_tasks:
+        file: sync_tree.yml
+        apply:
+          tags:
+            - always
+      loop: "{{ ssv_sync_trees }}"
+      loop_control:
+        loop_var: ssv_sync_tree
+
+    - name: Require GPU base image
+      ansible.builtin.import_tasks: assert_gpu_base.yml
+
+    - name: Stat GPU python env
+      ansible.builtin.stat:
+        path: "{{ ssv_gpu_python_env }}"
+      register: ssv_gpu_env_stat
+      when: ssv_job_devices | length > 0
+
+    - name: Require GPU python env
+      ansible.builtin.assert:
+        that:
+          - ssv_gpu_env_stat.stat.isdir | default(false)
+        fail_msg: "GPU python env missing at {{ ssv_gpu_python_env }}"
+      when: ssv_job_devices | length > 0
+
+    - name: Compose CUDA library path from image Env and wheel dirs
+      ansible.builtin.import_tasks: cuda_ldpath.yml
+      when: ssv_job_devices | length > 0
+
+    - name: Resolve GPU device specs to explicit paths and driver libs
+      ansible.builtin.import_tasks: resolve_gpu.yml
+      when: ssv_job_devices | length > 0
+
+    - name: Gather job overlay image
+      containers.podman.podman_image_info:
+        name: "localhost/ipclaim-ssv-gpu-runtime:{{ ssv_job_kind }}"
+      register: ssv_runtime_image
+      failed_when: false
+      when: ssv_job_kind == 'covering'
+
+    - name: Ensure build context ignore file
+      ansible.builtin.copy:
+        dest: "{{ ip_claim_repo_dir }}/.containerignore"
+        content: |
+          # Exclude everything; allow only dirs the overlay Containerfile COPYs
+          *
+          !src/
+          !configs/
+          !experiments/
+        mode: "0644"
+
+    - name: Build job overlay on the loaded GPU base
+      containers.podman.podman_image:
+        name: "localhost/ipclaim-ssv-gpu-runtime:{{ ssv_job_kind }}"
+        path: "{{ ip_claim_repo_dir }}"
+        force: "{{ ssv_job_kind != 'covering' }}"
+        state: build
+        build:
+          file: "{{ ip_claim_repo_dir }}/containers/gpu-runtime/overlay.Containerfile"
+          extra_args: "--build-arg BASE_IMAGE={{ ssv_gpu_base_image }}"
+      when: >
+        ssv_job_kind != 'covering'
+        or (ssv_runtime_image.images | default([]) | length == 0)
+
+    - name: Prepare covering helpers
+      ansible.builtin.import_tasks: covering.yml
+      when: ssv_job_kind == 'covering'
+
+    - name: Start job container
+      containers.podman.podman_container:
+        name: "{{ ssv_job_name }}"
+        image: "localhost/ipclaim-ssv-gpu-runtime:{{ ssv_job_kind }}"
+        device: "{{ ssv_resolved_devices | default(ssv_job_devices) }}"
+        volume: "{{ ssv_job_volumes }}"
+        env: "{{ ssv_runtime_env }}"
+        command: "{{ ssv_job_command }}"
+
+    - name: Wait for the job process to publish state
+      ansible.builtin.wait_for:
+        timeout: 8
+
+    - name: Gather started job facts
+      containers.podman.podman_container_info:
+        name:
+          - "{{ ssv_job_name }}"
+      register: ssv_started_info
+
+    - name: Show started job
+      ansible.builtin.debug:
+        var: ssv_job_started
+      vars:
+        ssv_started: "{{ (ssv_started_info.containers | default([{}]))[0] }}"
+        ssv_job_started:
+          name: "{{ ssv_job_name }}"
+          image: "{{ ssv_started.ImageName | default('') }}"
+          command: "{{ ssv_job_command }}"
+          devices: "{{ ssv_resolved_devices | default(ssv_job_devices) }}"
+          status: "{{ (ssv_started.State | default({})).Status | default('') }}"
+          exit_code: "{{ (ssv_started.State | default({})).ExitCode | default('') }}"
+          oom: "{{ (ssv_started.State | default({})).OOMKilled | default(false) }}"
+          error: "{{ (ssv_started.State | default({})).Error | default('') }}"
+          started: "{{ (ssv_started.State | default({})).StartedAt | default('') }}"
+
+    - name: Require the job did not crash on start
+      ansible.builtin.assert:
+        that:
+          - ssv_started_info.containers | default([]) | length > 0
+          - >-
+            (ssv_started_info.containers[0].State.Status == 'running')
+            or ((ssv_started_info.containers[0].State.ExitCode | int) == 0)
+        fail_msg: >-
+          {{ ssv_job_name }}
+          {{ ssv_started_info.containers[0].State.Status }}
+          exit {{ ssv_started_info.containers[0].State.ExitCode }}
+
+    - name: Follow running jobs
+      ansible.builtin.import_tasks: follow.yml

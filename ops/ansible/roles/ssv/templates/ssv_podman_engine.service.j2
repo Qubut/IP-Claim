@@ -1,0 +1,10 @@
+[Unit]
+Description=Isolated Podman API service ({{ ssv_deploy_id }})
+
+[Service]
+Environment=TMPDIR={{ ssv_podman_tmpdir }}
+ExecStart=/usr/bin/podman --root {{ ssv_podman_root }} --runroot {{ ssv_podman_runroot }} system service --time=0 unix://{{ ssv_podman_socket }}
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

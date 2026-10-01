@@ -1,0 +1,62 @@
+---
+- name: Stat patent-ate sources
+  ansible.builtin.stat:
+    path: "{{ ssv_ate_src_root }}"
+  register: ssv_ate_stat
+
+- name: Require patent-ate sources
+  ansible.builtin.assert:
+    that:
+      - ssv_ate_stat.stat.isdir | default(false)
+    fail_msg: "patent-ate sources missing at {{ ssv_ate_src_root }}"
+
+- name: Stat ST.14 analyze dataset
+  ansible.builtin.stat:
+    path: "{{ epo_dataset_path }}"
+  register: ssv_covering_citations
+
+- name: Require ST.14 analyze dataset
+  ansible.builtin.assert:
+    that:
+      - ssv_covering_citations.stat.isreg | default(false)
+    fail_msg: "ST.14 citation parquet missing at {{ epo_dataset_path }}"
+
+- name: Ensure covering helper directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ ssv_output_host_root }}/covering-objective"
+    - "{{ ssv_output_host_root }}/covering-objective/bin"
+    - "{{ ssv_output_host_root }}/covering-objective/pydeps"
+    - "{{ ssv_output_host_root }}/covering-objective/ledgers"
+
+- name: Stat covering pytest target
+  ansible.builtin.stat:
+    path: "{{ ssv_output_host_root }}/covering-objective/pydeps/pytest"
+  register: ssv_covering_pytest
+
+- name: Install covering pytest into the output target
+  ansible.builtin.pip:
+    name:
+      - pytest
+      - hypothesis
+      - pytest-asyncio
+    extra_args: "--target {{ ssv_output_host_root }}/covering-objective/pydeps"
+    executable: "{{ ssv_gpu_python_env }}/bin/python"
+  when: not (ssv_covering_pytest.stat.exists | default(false))
+
+- name: Install covering ldconfig stub
+  ansible.builtin.copy:
+    dest: "{{ ssv_output_host_root }}/covering-objective/bin/ldconfig"
+    content: |
+      #!/bin/sh
+      exit 0
+    mode: "0755"
+
+- name: Prepend covering helper dir to PATH
+  ansible.builtin.set_fact:
+    ssv_runtime_env: "{{ ssv_runtime_env | combine({'PATH': ssv_covering_path}) }}"
+  vars:
+    ssv_covering_path: "/outputs/covering-objective/bin:{{ ssv_image_env.PATH | default('/app/.venv/bin:/bin:/usr/bin') }}"

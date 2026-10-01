@@ -1,0 +1,68 @@
+---
+# Secrets and host identity from the controller environment only.
+# devenv shell loads repo .env via dotenv; run playbooks inside devenv shell.
+#
+# Fail closed when SERVER or SERVER_USER is empty.
+ansible_host: "{{ lookup('env', 'SERVER') }}"
+ansible_user: "{{ lookup('env', 'SERVER_USER') }}"
+# Operator SSH config owns hop and key. Do not set ansible_password
+# on the destination. Extra hop flags (jump sshpass) come from the
+# controller environment only.
+ansible_ssh_private_key_file: "{{ lookup('env', 'SERVER_SSH_KEY') | default(omit, true) }}"
+ansible_ssh_common_args: "{{ lookup('env', 'SERVER_SSH_ARGS') | default('', true) }}"
+
+# SSH account numeric identity on this host. Rootless keep-id and the
+# isolated Podman runroot both need it; plays do not shell id -u / id -g.
+runtime_uid: "1002"
+runtime_gid: "1002"
+server_user_home: "/home/{{ ansible_user }}"
+epo_run_user: "{{ runtime_uid }}:{{ runtime_gid }}"
+
+epo_data_root: /mnt/workspaces/epo-data
+
+# Server mirror of the ip-claim working tree (ssv copies overlay context
+# each run; nix closures and Podman layers stay on the server).
+ip_claim_repo_dir: "{{ server_user_home }}/ip-claim"
+
+epo_hupd_dir: "{{ epo_data_root }}/hupd"
+epo_logs_dir: "{{ epo_data_root }}/logs"
+epo_archives_dir: "{{ epo_data_root }}/archives"
+epo_parquet_path: "{{ epo_data_root }}/epo.parquet"
+epo_dataset_path: "{{ epo_data_root }}/epo_hupd_dataset.parquet"
+epo_checkpoint_db: "{{ epo_data_root }}/.epo-state.db"
+epo_spool_dir: "{{ epo_data_root }}/spool"
+
+epo_image: ghcr.io/qubut/epo-processor:latest
+epo_container_hupd: epo-process-hupd
+epo_container_process: epo-process
+epo_container_analyze: epo-analyze
+
+# Mount host data root at this path inside the container.
+epo_container_data: /data
+
+# EPO BDDS defaults (image does not load config.yaml; flags required).
+epo_bdds_base_url: "https://publication-bdds.apps.epo.org/bdds/bdds-bff-service/prod/api/public"
+epo_bdds_product_id: 3
+
+# Optional HF token for HUPD download (empty string skips -e).
+hf_token: >-
+  {{ lookup('env', 'HF_TOKEN')
+     | default(lookup('env', 'HUGGING_FACE_HUB_TOKEN'), true)
+     | default('', true) }}
+
+# When true, remove exited containers with matching names before start.
+epo_recreate_exited: true
+
+# HUPD all-years tarball (process-hupd --url). HF_TOKEN from env helps rate limits.
+# --filename is required: empty ArchiveJob name makes HTTPOpener skip as KindUnknown.
+epo_hupd_url: "https://huggingface.co/datasets/HUPD/hupd/resolve/main/data/all-years.tar"
+epo_hupd_filename: all-years.tar
+
+# Distroless-style image has no CA bundle; mount host certs for HTTPS (HF + EPO).
+epo_host_ssl_certs: /etc/ssl/certs
+epo_container_ssl_certs: /etc/ssl/certs
+epo_ssl_cert_file: /etc/ssl/certs/ca-certificates.crt
+
+# File logs inside the container (bind-mounted host logs/ is mode 0750; rootless
+# writers still hit permission denials on bracketed log filenames). Use podman logs.
+epo_container_log_dir: /tmp/epo-logs

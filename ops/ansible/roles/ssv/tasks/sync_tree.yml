@@ -1,0 +1,32 @@
+- name: "Ensure overlay dest {{ ssv_sync_tree }}"
+  ansible.builtin.file:
+    path: "{{ ip_claim_repo_dir }}/{{ ssv_sync_tree }}"
+    state: directory
+    mode: "0755"
+
+- name: "Rsync overlay tree {{ ssv_sync_tree }}"
+  ansible.posix.synchronize:
+    src: "{{ ssv_controller_root }}/{{ ssv_sync_tree }}/"
+    dest: "{{ ip_claim_repo_dir }}/{{ ssv_sync_tree }}/"
+    archive: true
+    owner: false
+    group: false
+    compress: true
+    delete: true
+    recursive: true
+    use_ssh_args: true
+    ssh_connection_multiplexing: true
+    verify_host: true
+    rsync_opts:
+      - "--info=name0,stats2"
+      - "--human-readable"
+  register: ssv_tree_rsync
+
+- name: "Show rsync {{ ssv_sync_tree }}"
+  ansible.builtin.debug:
+    var: ssv_tree_rsync_view
+  vars:
+    ssv_tree_rsync_view:
+      tree: "{{ ssv_sync_tree }}"
+      changed: "{{ ssv_tree_rsync.changed }}"
+      stdout: "{{ ssv_tree_rsync.stdout | default('') }}"

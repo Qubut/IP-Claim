@@ -1,0 +1,12 @@
+---
+argument_specs:
+  ensure:
+    short_description: Recreate-exited then start one EPO container from vars_from.
+    options:
+      epo_job_name:
+        type: str
+        required: true
+      epo_job_command:
+        type: list
+        required: true
+        elements: str

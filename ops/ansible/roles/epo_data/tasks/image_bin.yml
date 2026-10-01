@@ -1,0 +1,19 @@
+---
+- name: Resolve epo-processor binary from image Cmd
+  containers.podman.podman_image_info:
+    name: "{{ epo_image }}"
+  register: epo_image_info
+
+- name: Assert image Cmd[0] is epo-processor
+  ansible.builtin.assert:
+    that:
+      - epo_image_info.images | length > 0
+      - (epo_image_info.images[0].Config.Cmd | default([])) | length > 0
+      - "'epo-processor' in (epo_image_info.images[0].Config.Cmd[0] | string)"
+    fail_msg: >-
+      unexpected image Cmd[0]:
+      {{ (epo_image_info.images[0].Config.Cmd | default(['missing']))[0] | default('missing') }}
+
+- name: Set epo-processor entrypoint from image Cmd
+  ansible.builtin.set_fact:
+    epo_bin: "{{ epo_image_info.images[0].Config.Cmd[0] }}"

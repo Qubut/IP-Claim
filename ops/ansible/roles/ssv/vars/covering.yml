@@ -1,0 +1,46 @@
+---
+ssv_job_kind: covering
+ssv_job_devices:
+  - nvidia.com/gpu=0
+  - nvidia.com/gpu=1
+ssv_job_volumes: "{{ [
+  ssv_hupd_host_root ~ ':/data/hupd:ro',
+  ssv_output_host_root ~ ':/outputs',
+  ssv_ate_src_root ~ ':/opt/patent-ate:ro',
+  ssv_epo_data_volume,
+  ip_claim_repo_dir ~ '/src:/app/src:ro',
+  ip_claim_repo_dir ~ '/configs:/app/configs:ro',
+  ip_claim_repo_dir ~ '/experiments:/app/experiments:ro'
+] + ssv_job_gpu_lib_volumes }}"
+ssv_job_command:
+  - python
+  - -m
+  - pytest
+  - experiments/covering_objective
+  - --override-ini
+  - addopts=
+  - -o
+  - cache_dir=/outputs/covering-objective/.pytest_cache
+  - --tb=long
+  - -q
+  - -s
+ssv_job_env:
+  PYTHONPATH: /outputs/covering-objective/pydeps:/opt/patent-ate:/outputs/ate-ray-full-hupd/pydivsufsort-site:/app/src
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  COVERING_HUPD_DIR: /data/hupd
+  COVERING_HUPD_INDEX: /outputs/ssv/hupd_path_index.txt
+  COVERING_CITATIONS: /data/epo-data/epo_hupd_dataset.parquet
+  COVERING_TERMHOOD: /outputs/ate-ray-full-hupd
+  COVERING_TRAIN_YAML: "{{ ssv_covering_train_yaml | default('/app/configs/ssv_train.prod.yaml') }}"
+  COVERING_LEDGER_ROOT: "{{ ssv_covering_ledger_root | default('/outputs/covering-objective/ledgers') }}"
+  HF_HOME: /outputs/hf
+  TRANSFORMERS_CACHE: /outputs/hf
+  HF_HUB_CACHE: /outputs/hf/hub
+  TORCHDYNAMO_DISABLE: "1"
+  TORCH_COMPILE_DISABLE: "1"
+  PYTHONUNBUFFERED: "1"
+  COVERING_REQUIRE_PAIR_DEVICES: "{{ ssv_covering_require_pair | default('1') }}"
+  CUDA_VISIBLE_DEVICES: "{{ ssv_covering_visible_devices | default('0,1') }}"
+  COVERING_OCCUPANCY_LIMIT: "{{ ssv_occupancy_limit | default('') }}"
+  IP_CLAIM_RAY_TEMP: /tmp/ip-claim-ray
+  RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"

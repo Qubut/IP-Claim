@@ -1,0 +1,46 @@
+---
+- name: Resolve epo-processor entrypoint
+  ansible.builtin.import_tasks: image_bin.yml
+
+- name: Warn when HF_TOKEN unset for HUPD
+  ansible.builtin.debug:
+    msg: >-
+      warn: HF_TOKEN unset; HUPD download may return empty or fail auth
+  when:
+    - epo_job_warn_empty_hf | default(false)
+    - (hf_token | length) == 0
+
+- name: Gather facts for {{ epo_job_name }}
+  containers.podman.podman_container_info:
+    name:
+      - "{{ epo_job_name }}"
+  register: epo_job_info
+
+- name: Decide whether to start {{ epo_job_name }}
+  ansible.builtin.set_fact:
+    epo_job_start: >-
+      {{
+        (epo_job_info.containers | default([]) | length == 0)
+        or (
+          ((epo_job_info.containers[0].State.Status | default('')) == 'exited')
+          and (epo_recreate_exited | bool)
+        )
+      }}
+
+- name: Remove exited {{ epo_job_name }} when recreate enabled
+  containers.podman.podman_container:
+    name: "{{ epo_job_name }}"
+    state: absent
+  when:
+    - epo_recreate_exited | bool
+    - epo_job_info.containers | default([]) | length > 0
+    - (epo_job_info.containers[0].State.Status | default('')) == 'exited'
+
+- name: Ensure {{ epo_job_name }} started
+  containers.podman.podman_container:
+    name: "{{ epo_job_name }}"
+    entrypoint: "{{ epo_bin }}"
+    env: "{{ epo_job_env | default(omit) }}"
+    command: "{{ epo_job_command }}"
+  when: epo_job_start | bool
+  no_log: "{{ epo_job_no_log | default(false) }}"

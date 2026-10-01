@@ -1,0 +1,27 @@
+---
+# Operator entry for SSV and EPO playbooks. Tags stay on the ansible-playbook
+# cmdline that navigator forwards. Official:
+# https://ansible.readthedocs.io/projects/navigator/faq/
+# (How do I use ansible-playbook parameters like --forks 15)
+#
+#   cd ops/ansible
+#   ansible-navigator run playbooks/ssv_train.yml -- --tags covering
+#   ansible-navigator run playbooks/ssv_train.yml -- --tags status
+#   ansible-navigator run playbooks/ssv_train.yml -- --list-tags
+#   ansible-navigator replay artifacts/<artifact>.json
+ansible-navigator:
+  ansible:
+    config:
+      path: ansible.cfg
+    inventory:
+      entries:
+        - inventory/hosts.yml
+  execution-environment:
+    enabled: false
+  logging:
+    level: warning
+    file: artifacts/ansible-navigator.log
+  mode: stdout
+  playbook-artifact:
+    enable: true
+    save-as: artifacts/{playbook_name}-{time_stamp}.json

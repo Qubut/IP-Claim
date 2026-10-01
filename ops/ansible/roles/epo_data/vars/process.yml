@@ -1,0 +1,18 @@
+---
+epo_job_name: "{{ epo_container_process }}"
+epo_job_command:
+  - process
+  - --base-url
+  - "{{ epo_bdds_base_url }}"
+  - --product-id
+  - "{{ epo_bdds_product_id | string }}"
+  - --out
+  - "{{ epo_container_data }}/epo.parquet"
+  - --checkpoint
+  - "{{ epo_container_data }}/.epo-state.db"
+  - --archive-dir
+  - "{{ epo_container_data }}/archives"
+  - --spool-dir
+  - "{{ epo_container_data }}/spool"
+  - --log-dir
+  - "{{ epo_container_log_dir }}"

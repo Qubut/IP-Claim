@@ -1,0 +1,18 @@
+---
+ssv_job_kind: probe
+ssv_job_volumes:
+  - "{{ ssv_hupd_host_root }}:/data/hupd:ro"
+  - "{{ ssv_output_host_root }}:/outputs"
+ssv_job_command:
+  - python
+  - -m
+  - ip_claim.ssv
+  - probe-ingress
+  - --output
+  - /outputs/ate-occupy-full-hupd
+  - --termhood
+  - /outputs/ate-ray-full-hupd
+  - --extract
+  - /outputs/ate-ray-full-hupd/extract
+  - --seed
+  - "20260830"

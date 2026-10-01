@@ -1,0 +1,13 @@
+---
+ssv_job_command:
+  - python
+  - -m
+  - pytest
+  - experiments/covering_objective/test_letter_graph_contribution.py::TestLetterGraphContributionLive
+  - --override-ini
+  - addopts=
+  - -o
+  - cache_dir=/outputs/covering-objective/.pytest_cache
+  - --tb=short
+  - -q
+  - -s

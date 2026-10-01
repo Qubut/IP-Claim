@@ -1,0 +1,24 @@
+---
+ssv_job_kind: train
+ssv_job_devices:
+  - nvidia.com/gpu=all
+ssv_job_volumes: "{{ [
+  ssv_hupd_host_root ~ ':/data/hupd:ro',
+  ssv_output_host_root ~ ':/outputs',
+  ssv_ate_src_root ~ ':/opt/patent-ate:ro'
+] + ssv_job_gpu_lib_volumes }}"
+ssv_job_env:
+  PYTHONPATH: /opt/patent-ate:/outputs/ate-ray-full-hupd/pydivsufsort-site:/app/src
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  TORCHDYNAMO_DISABLE: "1"
+  TORCH_COMPILE_DISABLE: "1"
+ssv_job_command:
+  - python
+  - -m
+  - ip_claim.ssv
+  - train
+  - --local
+  - --config
+  - "{{ ssv_train_config }}"
+  - --hupd-dir
+  - /data/hupd

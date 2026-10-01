@@ -1,0 +1,10 @@
+---
+epo_job_name: "{{ epo_container_analyze }}"
+epo_job_command:
+  - analyze
+  - "{{ epo_container_data }}/hupd"
+  - "{{ epo_container_data }}/epo.parquet"
+  - --dataset
+  - "{{ epo_container_data }}/epo_hupd_dataset.parquet"
+  - --log-dir
+  - "{{ epo_container_log_dir }}"

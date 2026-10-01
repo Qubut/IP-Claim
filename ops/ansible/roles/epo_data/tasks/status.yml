@@ -1,0 +1,47 @@
+---
+- name: Gather EPO container facts
+  containers.podman.podman_container_info:
+    name:
+      - "{{ epo_container_hupd }}"
+      - "{{ epo_container_process }}"
+      - "{{ epo_container_analyze }}"
+  register: epo_container_info
+  changed_when: false
+  failed_when: false
+
+- name: Stat HUPD directory
+  ansible.builtin.stat:
+    path: "{{ epo_hupd_dir }}"
+  register: epo_hupd_stat
+
+- name: Stat epo.parquet
+  ansible.builtin.stat:
+    path: "{{ epo_parquet_path }}"
+  register: epo_parquet_stat
+
+- name: Stat epo dataset
+  ansible.builtin.stat:
+    path: "{{ epo_dataset_path }}"
+  register: epo_dataset_stat
+
+- name: Stat archives directory
+  ansible.builtin.stat:
+    path: "{{ epo_archives_dir }}"
+  register: epo_archives_stat
+
+- name: Stat spool directory
+  ansible.builtin.stat:
+    path: "{{ epo_spool_dir }}"
+  register: epo_spool_stat
+
+- name: Show EPO status
+  ansible.builtin.debug:
+    var: epo_status
+  vars:
+    epo_status:
+      containers: "{{ epo_container_info.containers | default([]) }}"
+      hupd: "{{ epo_hupd_stat.stat }}"
+      parquet: "{{ epo_parquet_stat.stat }}"
+      dataset: "{{ epo_dataset_stat.stat }}"
+      archives: "{{ epo_archives_stat.stat }}"
+      spool: "{{ epo_spool_stat.stat }}"

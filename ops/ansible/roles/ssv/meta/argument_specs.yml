@@ -1,0 +1,14 @@
+---
+argument_specs:
+  main:
+    short_description: Start one isolated-engine GPU job from role vars_from.
+    options:
+      ssv_job_kind:
+        type: str
+        required: true
+        choices:
+          - covering
+          - train
+          - ablate
+          - probe
+          - collision

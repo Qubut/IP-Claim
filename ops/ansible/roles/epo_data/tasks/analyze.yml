@@ -1,0 +1,26 @@
+---
+- name: Stat HUPD directory
+  ansible.builtin.stat:
+    path: "{{ epo_hupd_dir }}"
+  register: epo_hupd_stat
+
+- name: Require HUPD directory for analyze
+  ansible.builtin.assert:
+    that:
+      - epo_hupd_stat.stat.isdir | default(false)
+    fail_msg: "analyze blocked: need directory {{ epo_hupd_dir }}"
+
+- name: Stat epo.parquet
+  ansible.builtin.stat:
+    path: "{{ epo_parquet_path }}"
+  register: epo_parquet_stat
+
+- name: Require epo.parquet for analyze
+  ansible.builtin.assert:
+    that:
+      - epo_parquet_stat.stat.isreg | default(false)
+      - (epo_parquet_stat.stat.size | default(0) | int) >= 1
+    fail_msg: "analyze blocked: need non-empty {{ epo_parquet_path }}"
+
+- name: Ensure analyze container
+  ansible.builtin.import_tasks: ensure.yml

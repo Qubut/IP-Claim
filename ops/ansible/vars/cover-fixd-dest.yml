@@ -1,0 +1,5 @@
+ssv_job_name: job-covering-fixd-dest
+ssv_covering_train_yaml: /outputs/covering-objective/judge-2x2/dest.yaml
+ssv_covering_ledger_root: /outputs/covering-objective/ledgers/fixd-dest
+ssv_job_devices:
+  - nvidia.com/gpu=1

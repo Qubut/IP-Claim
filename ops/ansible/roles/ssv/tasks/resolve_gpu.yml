@@ -1,0 +1,117 @@
+---
+# Podman 4.x has no native CDI support. The containers.podman collection
+# hangs when given nvidia.com/gpu=N CDI device names. This task resolves
+# CDI-style device specs to explicit /dev/nvidiaN device paths and mounts
+# the host NVIDIA driver libraries (libcuda.so, libnvidia-ml.so) into the
+# container so CUDA can initialise without the NVIDIA Container Runtime.
+
+- name: Detect NVIDIA driver library path on host
+  ansible.builtin.stat:
+    path: /usr/lib/x86_64-linux-gnu/libcuda.so.1
+  register: ssv_libcuda_link
+
+- name: Require NVIDIA driver library on host
+  ansible.builtin.assert:
+    that:
+      - ssv_libcuda_link.stat.exists
+    fail_msg: NVIDIA driver library libcuda.so.1 not found on host
+
+- name: Resolve libcuda.so.1 real path
+  ansible.builtin.command:
+    argv:
+      - readlink
+      - -f
+      - /usr/lib/x86_64-linux-gnu/libcuda.so.1
+  register: ssv_libcuda_real
+  changed_when: false
+
+- name: Resolve libnvidia-ml.so.1 real path
+  ansible.builtin.command:
+    argv:
+      - readlink
+      - -f
+      - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1
+  register: ssv_nvidia_ml_real
+  changed_when: false
+  failed_when: false
+
+- name: Set NVIDIA driver lib mount directory
+  ansible.builtin.set_fact:
+    ssv_nvidia_lib_dir: /nvidia-libs
+    ssv_libcuda_src: "{{ ssv_libcuda_real.stdout }}"
+    ssv_nvidia_ml_src: "{{ ssv_nvidia_ml_real.stdout | default('') }}"
+
+- name: Build NVIDIA driver lib volume mounts
+  ansible.builtin.set_fact:
+    ssv_nvidia_driver_volumes: >-
+      {{
+        [
+          ssv_libcuda_src ~ ':' ~ ssv_nvidia_lib_dir ~ '/libcuda.so.1:ro'
+        ]
+        + ([ssv_nvidia_ml_src ~ ':' ~ ssv_nvidia_lib_dir ~ '/libnvidia-ml.so.1:ro']
+           if ssv_nvidia_ml_src | length > 0 else [])
+      }}
+
+- name: Extract GPU indices from device specs
+  ansible.builtin.set_fact:
+    ssv_gpu_indices: >-
+      {{
+        ssv_job_devices
+        | map('regex_search', 'nvidia\.com/gpu=(\d+)', '\1')
+        | map('last')
+        | list
+      }}
+  when: ssv_job_devices | select('match', 'nvidia\.com/gpu=\d+') | list | length > 0
+
+- name: Detect all GPU indices on host
+  ansible.builtin.command:
+    argv:
+      - nvidia-smi
+      - --list-gpus
+      - --format=csv,noheader
+  register: ssv_gpu_list
+  changed_when: false
+  when: ssv_job_devices | select('match', 'nvidia\.com/gpu=all') | list | length > 0
+
+- name: Set GPU indices for all GPUs
+  ansible.builtin.set_fact:
+    ssv_gpu_indices: >-
+      {{
+        ssv_gpu_list.stdout_lines
+        | map('regex_replace', '^GPU (\d+).*', '\1')
+        | list
+      }}
+  when: ssv_job_devices | select('match', 'nvidia\.com/gpu=all') | list | length > 0
+
+- name: Build explicit device path list
+  ansible.builtin.set_fact:
+    ssv_resolved_devices: >-
+      {{
+        (ssv_gpu_indices | map('regex_replace', '^', '/dev/nvidia') | list)
+        + ['/dev/nvidiactl', '/dev/nvidia-uvm', '/dev/nvidia-uvm-tools',
+           '/dev/nvidia-modeset', '/dev/nvidia-caps']
+      }}
+  when: ssv_gpu_indices is defined and ssv_gpu_indices | length > 0
+
+- name: Use explicit device paths directly (no CDI names)
+  ansible.builtin.set_fact:
+    ssv_resolved_devices: "{{ ssv_job_devices }}"
+  when: ssv_gpu_indices is not defined or ssv_gpu_indices | length == 0
+
+- name: Merge driver lib volumes into job volumes
+  ansible.builtin.set_fact:
+    ssv_job_volumes: "{{ ssv_job_volumes + ssv_nvidia_driver_volumes }}"
+
+- name: Merge nvidia-libs into LD_LIBRARY_PATH
+  ansible.builtin.set_fact:
+    ssv_runtime_env: >-
+      {{
+        ssv_runtime_env
+        | combine({
+            'LD_LIBRARY_PATH': (
+                ssv_runtime_env.LD_LIBRARY_PATH | default('')
+                + (':' if ssv_runtime_env.LD_LIBRARY_PATH | default('') | length > 0 else '')
+                + ssv_nvidia_lib_dir
+            )
+        })
+      }}

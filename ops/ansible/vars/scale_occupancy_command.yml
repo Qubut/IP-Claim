@@ -1,0 +1,13 @@
+---
+ssv_job_command:
+  - python
+  - -m
+  - pytest
+  - experiments/covering_objective/test_scale_occupancy.py::TestScaleOccupancyLive
+  - --override-ini
+  - addopts=
+  - -o
+  - cache_dir=/outputs/covering-objective/.pytest_cache
+  - --tb=short
+  - -q
+  - -s

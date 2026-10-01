@@ -1,0 +1,16 @@
+---
+ssv_job_kind: collision
+ssv_job_devices:
+  - nvidia.com/gpu=all
+ssv_job_volumes: "{{ [
+  ssv_hupd_host_root ~ ':/data/hupd:ro',
+  ssv_output_host_root ~ ':/outputs',
+  ssv_epo_data_volume
+] + ssv_job_gpu_lib_volumes }}"
+ssv_job_command:
+  - python
+  - -m
+  - ip_claim.collision
+  - eval
+  - --config
+  - configs/collision_eval.yaml

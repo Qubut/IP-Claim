@@ -1,0 +1,3 @@
+ssv_job_devices:
+  - nvidia.com/gpu=2
+  - nvidia.com/gpu=3

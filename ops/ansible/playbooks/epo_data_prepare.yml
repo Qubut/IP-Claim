@@ -1,0 +1,82 @@
+---
+# Idempotent EPO / HUPD data prep on the remote server.
+#
+# Tags:
+#   prepare       — dirs + image pull
+#   start_hupd    — ensure detached process-hupd
+#   start_process — ensure detached process
+#   start_analyze — ensure detached analyze --dataset (gated)
+#   status        — collection info modules + debug
+#
+#   ansible-navigator run playbooks/epo_data_prepare.yml -- --tags prepare,status
+#   ansible-navigator run playbooks/epo_data_prepare.yml -- --tags start_hupd,start_process
+
+- name: Prepare epo-processor data workspace
+  hosts: servers
+  gather_facts: false
+  module_defaults:
+    ansible.builtin.file:
+      owner: "{{ ansible_user }}"
+      group: "{{ ansible_user }}"
+    containers.podman.podman_container:
+      image: "{{ epo_image }}"
+      state: started
+      detach: true
+      userns: keep-id
+      user: "{{ epo_run_user }}"
+      env:
+        SSL_CERT_FILE: "{{ epo_ssl_cert_file }}"
+      volume:
+        - "{{ epo_data_root }}:{{ epo_container_data }}"
+        - "{{ epo_host_ssl_certs }}:{{ epo_container_ssl_certs }}:ro"
+  tasks:
+    - name: Require server identity
+      ansible.builtin.assert:
+        that:
+          - ansible_host | length > 0
+          - ansible_user | length > 0
+        fail_msg: TEXTLESS_SERVER and TEXTLESS_SERVER_USER must be set in the controller environment
+      tags: [always]
+
+    - name: Ensure epo-data directory tree and image
+      ansible.builtin.include_role:
+        name: epo_data
+        tasks_from: prepare
+        apply:
+          tags: [prepare]
+      tags: [prepare]
+
+    - name: Ensure process-hupd container
+      ansible.builtin.include_role:
+        name: epo_data
+        tasks_from: ensure
+        vars_from: hupd
+        apply:
+          tags: [start_hupd]
+      tags: [start_hupd]
+
+    - name: Ensure process container
+      ansible.builtin.include_role:
+        name: epo_data
+        tasks_from: ensure
+        vars_from: process
+        apply:
+          tags: [start_process]
+      tags: [start_process]
+
+    - name: Ensure analyze container
+      ansible.builtin.include_role:
+        name: epo_data
+        tasks_from: analyze
+        vars_from: analyze
+        apply:
+          tags: [start_analyze]
+      tags: [start_analyze]
+
+    - name: EPO status
+      ansible.builtin.include_role:
+        name: epo_data
+        tasks_from: status
+        apply:
+          tags: [status]
+      tags: [status]

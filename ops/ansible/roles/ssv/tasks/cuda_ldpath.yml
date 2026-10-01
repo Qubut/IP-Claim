@@ -1,0 +1,64 @@
+---
+# Compose LD_LIBRARY_PATH from the GPU base image Env plus wheel lib dirs
+# on the host nix store. Same inspect grain as epo Config.Cmd.
+
+- name: Index GPU base image environment
+  ansible.builtin.set_fact:
+    ssv_image_env: "{{ dict((ssv_job_base.images[0].Config.Env | default([])) | map('split', '=', 1) | list) }}"
+
+- name: Locate CPython libdir in the GPU env
+  ansible.builtin.find:
+    paths: "{{ ssv_gpu_python_env }}/lib"
+    patterns: python3.*
+    file_type: directory
+    recurse: false
+  register: ssv_python_libdirs
+
+- name: Require a CPython libdir
+  ansible.builtin.assert:
+    that:
+      - ssv_python_libdirs.files | length > 0
+    fail_msg: "No python3.* under {{ ssv_gpu_python_env }}/lib"
+
+- name: Stat NVIDIA wheel root
+  ansible.builtin.stat:
+    path: "{{ ssv_python_libdirs.files[0].path }}/site-packages/nvidia"
+  register: ssv_nvidia_root
+
+# Wheel cuDNN lives at nvidia/<pkg>/lib, three levels below this root.
+- name: Locate NVIDIA wheel lib dirs
+  ansible.builtin.find:
+    paths: "{{ ssv_nvidia_root.stat.path }}"
+    patterns: lib
+    file_type: directory
+    recurse: true
+    follow: true
+    depth: 3
+  register: ssv_nvidia_libdirs
+  when: ssv_nvidia_root.stat.isdir | default(false)
+
+- name: Stat torch lib dir
+  ansible.builtin.stat:
+    path: "{{ ssv_python_libdirs.files[0].path }}/site-packages/torch/lib"
+  register: ssv_torch_libdir
+
+- name: Require CUDA wheel libraries
+  ansible.builtin.assert:
+    that:
+      - ssv_nvidia_libdirs.files | default([]) | length > 0
+      - ssv_torch_libdir.stat.isdir | default(false)
+    fail_msg: "Need nvidia/*/lib and torch/lib under {{ ssv_python_libdirs.files[0].path }}/site-packages"
+
+- name: Compose job LD_LIBRARY_PATH
+  ansible.builtin.set_fact:
+    ssv_runtime_env: "{{ ssv_runtime_env | combine({'LD_LIBRARY_PATH': ssv_cuda_ld_library_path}) }}"
+  vars:
+    ssv_cuda_ld_library_path: >-
+      {{
+        (
+          (ssv_nvidia_libdirs.files | default([]) | map(attribute='path') | list)
+          + ([ssv_torch_libdir.stat.path] if ssv_torch_libdir.stat.isdir | default(false) else [])
+          + ([ssv_image_env.LD_LIBRARY_PATH] if ssv_image_env.LD_LIBRARY_PATH | default('') else [])
+          + ['/usr/lib/x86_64-linux-gnu']
+        ) | join(':')
+      }}

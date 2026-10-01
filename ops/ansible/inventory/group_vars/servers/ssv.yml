@@ -1,0 +1,30 @@
+---
+# SSV jobs — isolated Podman engine. Socket and CONTAINER_HOST live here
+# so roles do not shell out to id -u.
+
+ssv_deploy_id: ipclaim-ssv
+ssv_runtime_uid: "{{ runtime_uid }}"
+ssv_opaque_server_root: /mnt/workspaces/epo-data/ip-claim-ssv-podman
+ssv_podman_root: "{{ ssv_opaque_server_root }}/storage"
+ssv_podman_runroot: "/run/user/{{ ssv_runtime_uid }}/{{ ssv_deploy_id }}"
+ssv_podman_tmpdir: "{{ ssv_opaque_server_root }}/tmp"
+ssv_podman_unit: "podman-{{ ssv_deploy_id }}.service"
+ssv_podman_socket: "/run/user/{{ ssv_runtime_uid }}/podman-{{ ssv_deploy_id }}.sock"
+ssv_container_host: "unix://{{ ssv_podman_socket }}"
+ssv_hf_token_secret: "{{ ssv_deploy_id }}-hf-token"
+
+ssv_train_config: configs/ssv_train.prod.yaml
+ssv_hupd_host_root: "{{ epo_hupd_dir }}"
+ssv_output_host_root: "{{ epo_data_root }}/ip-claim-ssv-runs"
+ssv_train_shm_size: 64g
+
+# Covering collection reuses a loaded GPU base. Do not rebuild uv2nix.
+ssv_gpu_base_tag: 75dp3nqymajrm63zbhis66ws08glbyv0
+ssv_gpu_base_image: "localhost/ipclaim-ssv-gpu-base:{{ ssv_gpu_base_tag }}"
+ssv_gpu_python_env: "/nix/store/{{ ssv_gpu_base_tag }}-gpu-runtime-env"
+ssv_ate_src_root: "{{ server_user_home }}/patent-ate/src"
+ssv_epo_data_volume: "{{ epo_data_root }}:/data/epo-data:ro"
+
+ssv_job_gpu_lib_volumes:
+  - /lib64/ld-linux-x86-64.so.2:/host-ld64:ro
+  - /lib/x86_64-linux-gnu:/host-lib:ro

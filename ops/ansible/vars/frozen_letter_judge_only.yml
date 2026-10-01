@@ -1,0 +1,6 @@
+ssv_job_command:
+  - /bin/bash
+  - -lc
+  - >-
+      python -c "from experiments.covering_objective.frozen_judgment import
+      judge_from_env; print(judge_from_env().model_dump_json())"
