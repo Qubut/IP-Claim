@@ -231,3 +231,19 @@ downloads
 
 # go
 .go/
+
+.tmp-uv/
+.tmp/
+.jupyter/
+.hf-cache/
+.coverage
+.python-version
+pyrightconfig.json
+.devcontainer.json
+
+# Covering-objective run artefacts
+experiments/runs/
+
+# Ansible Navigator playbook artifacts
+ops/ansible/artifacts/
+
