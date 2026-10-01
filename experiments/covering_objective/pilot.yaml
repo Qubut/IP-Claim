@@ -1,0 +1,38 @@
+seed: 42
+hygiene_n: 64
+hygiene_fraction: 0.9
+isolated_steps: 20
+isolated_readouts: [0, 1, 5, 10]
+held_out_steps: 100
+held_out_ceiling_s: 3600
+held_out_n: 512
+patch_n: 32
+functional_n: 8
+functional_step: 1.0e-4
+functional_steps: [1.0e-6, 1.0e-5, 1.0e-4]
+encode_max_length: 256
+batch_size: 16
+algebraic_examples: 64
+disclosure_max_chunks: 8
+mask_schedule: scheduled
+entropy_pause_ratio: 0.95
+letter:
+  n_pairs: 4
+  graph_on_xa: 0.45
+  graph_off_xa: 0.05
+  text_only_xa: 0.12
+  noise: 0.01
+  parent_moved: true
+  unpaid_moved: true
+  saturated: false
+  intensities_ok: true
+inventory:
+  occupancy: 0.6
+  usage_entropy: 2.0
+  termhood_mass: 4.0
+  overlay_norm: 1.0
+  compose_norm: 1.0
+  mixed_norm: 1.4
+  prefix_norm: 1.0
+  parent_moved: true
+  child_moved: true
